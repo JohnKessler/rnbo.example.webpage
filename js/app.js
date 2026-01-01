@@ -71,6 +71,10 @@ async function setup() {
     // Connect the device to the web audio graph
     device.node.connect(outputNode);
 
+	// After device.node.connect(outputNode);
+	if (window.initPlaylistUI)
+  		await window.initPlaylistUI(device, context);
+
     // (Optional) Extract the name and rnbo version of the patcher from the description
     document.getElementById("patcher-title").innerText = (patcher.desc.meta.filename || "Unnamed Patcher") + " (v" + patcher.desc.meta.rnboversion + ")";
 
