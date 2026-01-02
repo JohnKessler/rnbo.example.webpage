@@ -20,7 +20,7 @@ body {
   display: flex;
   justify-content: center;
   padding: 2rem;
-  box-sizing: content-box;
+  box-sizing: border-box;
 
 /* ---- Main container ---- */
 #playlist-ui {
@@ -28,7 +28,7 @@ body {
   background: #181818;
   border: 1px solid rgba(255,255,255,.25);
   padding: 6rem;
-  box-sizing: content-box;
+  box-sizing: border-box;
 }
 
 /* ---- Headings / readouts ---- */
