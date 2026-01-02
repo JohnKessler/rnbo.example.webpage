@@ -1,0 +1,220 @@
+/* ==========================================================
+   RNBO Playlist UI – Reframe Dark Skin
+   Used by playlist.html (iframe context)
+   ========================================================== */
+
+/* ---- Reset / base ---- */
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+body {
+  font-family: 'Source Sans Pro', sans-serif;
+  color: #fff;
+}
+
+/* ---- Outer centering ---- */
+.wrap {
+  display: flex;
+  justify-content: center;
+  padding: 2rem;
+  box-sizing: border-box;
+}
+
+/* ---- Main container ---- */
+#playlist-ui {
+  width: min(90rem, 100%);
+  background: #181818;
+  border: 1px solid rgba(255,255,255,.25);
+  padding: 6rem;
+  box-sizing: border-box;
+}
+
+/* ---- Headings / readouts ---- */
+#playlist-ui h1,
+#playlist-ui h2,
+#playlist-ui h3 {
+  margin: 0 0 2rem 0;
+  font-weight: 400;
+}
+
+#playlist-ui .rnbo-readout,
+#playlist-ui .rnbo-hint,
+#playlist-ui .rnbo-meta {
+  color: #7c7c7c;
+  font-size: 2.1rem;
+  line-height: 1.48em;
+}
+
+/* ---- Controls bar ---- */
+#playlist-ui .rnbo-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2.5rem;
+  margin-bottom: 3rem;
+}
+
+/* ---- Icon buttons (Play / Stop) ---- */
+#playlist-ui .rnbo-btn {
+  width: 5.6rem;
+  height: 5.6rem;
+  border-radius: 100%;
+  border: 0.1rem solid #fff;
+  background: none;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.6rem;
+  user-select: none;
+}
+
+#playlist-ui .rnbo-btn:hover {
+  background: #181818;
+}
+
+#playlist-ui .rnbo-btn:active {
+  transform: translateY(1px);
+}
+
+/* ---- Loop checkbox label ---- */
+#playlist-ui .rnbo-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 1.2rem;
+  color: #7c7c7c;
+  font-size: 2.1rem;
+}
+
+/* ---- Volume slider ---- */
+#playlist-ui .rnbo-slider {
+  width: 28rem;
+  background: none;
+}
+
+/* WebKit slider */
+#playlist-ui .rnbo-slider::-webkit-slider-runnable-track {
+  height: 0.1rem;
+  background: rgba(255,255,255,.25);
+}
+
+#playlist-ui .rnbo-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 2.6rem;
+  height: 2.6rem;
+  background: #fff;
+  border-radius: 100%;
+  margin-top: -1.25rem;
+  cursor: pointer;
+}
+
+/* Firefox slider */
+#playlist-ui .rnbo-slider::-moz-range-track {
+  height: 0.1rem;
+  background: rgba(255,255,255,.25);
+}
+
+#playlist-ui .rnbo-slider::-moz-range-thumb {
+  width: 2.6rem;
+  height: 2.6rem;
+  background: #fff;
+  border-radius: 100%;
+  border: none;
+  cursor: pointer;
+}
+
+/* ---- Progress bar ---- */
+#playlist-ui .rnbo-progress {
+  width: 100%;
+  height: 1rem;
+  background: #212121;
+  border: 1px solid rgba(255,255,255,.25);
+  margin-top: 2rem;
+}
+
+#playlist-ui progress::-webkit-progress-value {
+  background: #fff;
+}
+#playlist-ui progress::-webkit-progress-bar {
+  background: #212121;
+}
+#playlist-ui progress::-moz-progress-bar {
+  background: #fff;
+}
+
+/* ---- Playlist list ---- */
+#playlist-ui .rnbo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4rem;
+  margin-top: 5rem;
+}
+
+/* ---- Playlist row ---- */
+#playlist-ui .rnbo-row {
+  padding-bottom: 4rem;
+  border-bottom: 1px solid rgba(255,255,255,.25);
+}
+
+#playlist-ui .rnbo-row.selected {
+  border-bottom-color: #fff;
+}
+
+/* ---- Row header ---- */
+#playlist-ui .rnbo-row-header {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+/* Drag handle */
+#playlist-ui .rnbo-handle {
+  width: 5.6rem;
+  height: 5.6rem;
+  border-radius: 100%;
+  border: 0.1rem solid #fff;
+  background: none;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+
+/* Filename */
+#playlist-ui .rnbo-filename {
+  color: #fff;
+  font-size: 3.4rem;
+  line-height: 1.4em;
+  letter-spacing: -0.005em;
+  font-weight: 300;
+  word-break: break-word;
+}
+
+/* ---- Waveform canvas ---- */
+#playlist-ui .rnbo-canvas {
+  width: 100%;
+  height: auto;
+  background: #212121;
+  border: 1px solid rgba(255,255,255,.25);
+}
+
+/* ---- Mobile ---- */
+@media (max-width: 800px) {
+  #playlist-ui {
+    padding: 4rem;
+  }
+
+  #playlist-ui .rnbo-slider {
+    width: 22rem;
+  }
+
+  #playlist-ui .rnbo-filename {
+    font-size: 2.6rem;
+  }
+}
