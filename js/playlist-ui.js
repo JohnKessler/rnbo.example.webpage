@@ -6,6 +6,8 @@
 // - Play/Stop are round icon buttons (Reframe .icon-button style hook)
 // - Keeps all known-good functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
 //   drag reorder + persistence, keyboard shortcuts, touch-friendly interactions, volume via outGain.
+// - NEW: "Prime audio" on first Play so AudioContext resumes + RNBO node is connected (fixes silent playback
+//        when using a minimal playlist.html instead of the export's default index.html).
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
@@ -355,6 +357,30 @@
     const pStopTrig = ensureParam(device, "stopTrig");
     const pOutGain = ensureParam(device, "outGain");
 
+    // ----------------------------
+    // PRIME AUDIO (new)
+    // ----------------------------
+    let audioPrimed = false;
+    async function primeAudio() {
+      if (audioPrimed) return;
+
+      // Resume WebAudio context (autoplay policy safe because called from a user gesture)
+      if (context && context.state !== "running") {
+        await context.resume();
+      }
+
+      // Ensure RNBO node is connected (some minimal pages omit the default UI wiring)
+      try {
+        if (device?.node && context?.destination) {
+          device.node.connect(context.destination);
+        }
+      } catch (_) {
+        // ignore errors like "already connected"
+      }
+
+      audioPrimed = true;
+    }
+
     // Playback / playhead state
     let isPlaying = false;
     let endedAndStopped = false;
@@ -574,8 +600,12 @@
     // ----------------------------
     // Controls
     // ----------------------------
-    function doPlay() {
+    async function doPlay() {
       endedAndStopped = false;
+
+      // NEW: ensure audio context is running and RNBO is connected
+      await primeAudio();
+
       isPlaying = true;
       pulseParam(pPlayTrig);
     }
@@ -589,7 +619,7 @@
       redrawSelected(0);
     }
 
-    ui.btnPlay.addEventListener("click", doPlay);
+    ui.btnPlay.addEventListener("click", () => { doPlay().catch(console.error); });
     ui.btnStop.addEventListener("click", doStop);
 
     ui.loopToggle.addEventListener("change", () => {
@@ -674,13 +704,13 @@
       if (key === " " || key === "Spacebar") {
         e.preventDefault();
         if (isPlaying) doStop();
-        else doPlay();
+        else doPlay().catch(() => {});
         return;
       }
 
       if (key === "Enter") {
         e.preventDefault();
-        doPlay();
+        doPlay().catch(() => {});
         return;
       }
 
