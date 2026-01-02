@@ -5,14 +5,8 @@
 // - Keeps all known-good functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
 //   drag reorder + persistence, keyboard shortcuts, touch-friendly interactions, volume via outGain.
 // - "Prime audio" on first Play so AudioContext resumes + RNBO node is connected.
-// - NEW LAYOUT: Fixed top controls/header region; only the playlist rows scroll.
-//
-// Expected RNBO parameters (by id):
-//   clipIndex, rate, loop, playTrig, stopTrig, outGain
-// Expected RNBO external buffer name:
-//   "sample"
-// Expected port message tag (outport) for playhead:
-//   "playhead" with ms as payload[0]
+// - Layout: fixed top controls/header region; only the playlist rows scroll.
+// - PREMIUM: header separation reacts to scroll position + scroll velocity (subtle shadow/fade).
 
 (function () {
   "use strict";
@@ -122,6 +116,81 @@
   }
 
   // ----------------------------
+  // PREMIUM: scroll-reactive header separation
+  // ----------------------------
+  function installPremiumHeaderEffects(topEl, scrollEl) {
+    if (!topEl || !scrollEl) return;
+
+    // Respect reduced motion
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+
+    let lastTop = scrollEl.scrollTop || 0;
+    let lastT = performance.now();
+    let rafPending = false;
+
+    function setSep(intensity01, vel01) {
+      // intensity01: 0..1 (based on scrollTop > 0)
+      // vel01: 0..1 (based on scrolling speed)
+
+      // Base depth when scrolled, plus a little extra when moving fast
+      const sep = clamp01(intensity01);
+
+      // Shadow opacities (subtle)
+      const aBase = 0.22 * sep;
+      const bBase = 0.14 * sep;
+
+      // Velocity adds a tiny punch (still tasteful)
+      const punch = reduceMotion ? 0 : (0.12 * vel01 * sep);
+
+      const shadowA = clamp01(aBase + punch);
+      const shadowB = clamp01(bBase + (punch * 0.7));
+
+      // Fade strength
+      const fadeStart = clamp01((0.70 * sep) + (0.20 * vel01 * sep));
+
+      topEl.style.setProperty("--sep", String(sep));
+      topEl.style.setProperty("--shadowA", shadowA.toFixed(3));
+      topEl.style.setProperty("--shadowB", shadowB.toFixed(3));
+      topEl.style.setProperty("--fadeStart", fadeStart.toFixed(3));
+    }
+
+    function update() {
+      rafPending = false;
+
+      const now = performance.now();
+      const st = scrollEl.scrollTop || 0;
+
+      const dt = Math.max(8, now - lastT);
+      const dy = st - lastTop;
+
+      // px/s
+      const vel = Math.abs(dy) / (dt / 1000);
+
+      // Map velocity to 0..1 (0–1800px/s is the useful range)
+      const vel01 = clamp01(vel / 1800);
+
+      // Presence: only after you’re not at the very top
+      const intensity01 = st > 2 ? 1 : (st > 0 ? 0.35 : 0);
+
+      setSep(intensity01, vel01);
+
+      lastTop = st;
+      lastT = now;
+    }
+
+    function onScroll() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(update);
+    }
+
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+
+    // Initialize state
+    setSep((scrollEl.scrollTop || 0) > 2 ? 1 : 0, 0);
+  }
+
+  // ----------------------------
   // Waveform
   // ----------------------------
   function buildPeaks(audioBuffer, width) {
@@ -218,7 +287,7 @@
   }
 
   // ----------------------------
-  // UI creation (NEW: top fixed region + scrolling list region)
+  // UI creation (fixed top region + scrolling list region)
   // ----------------------------
   function buildUI() {
     injectStyleOnce();
@@ -299,6 +368,9 @@
 
     root.appendChild(top);
     root.appendChild(scroll);
+
+    // Install premium effects now that elements exist
+    installPremiumHeaderEffects(top, scroll);
 
     return {
       root,

@@ -1,6 +1,7 @@
 /* ==========================================================
    RNBO Playlist UI – Reframe Dark Skin
    iOS Safari iframe-safe: NO vh/dvh inside iframe
+   Premium: dynamic shadow + fade (driven by JS vars)
    ========================================================== */
 
 /* ---- Reset / base ---- */
@@ -48,7 +49,45 @@ body {
 
   position: relative;
   z-index: 2;
-  background: #181818;
+
+  /* Premium defaults (JS will animate these via CSS vars) */
+  --sep: 0; /* 0..1 separation intensity */
+  --shadowA: 0; /* opacity */
+  --shadowB: 0; /* opacity */
+  --fadeH: 28px;
+  --fadeStart: 0; /* alpha */
+
+  background: rgba(24, 24, 24, calc(1 - (0.10 * var(--sep))));
+  box-shadow:
+    0 10px 20px rgba(0, 0, 0, var(--shadowA)),
+    0 2px 4px rgba(0, 0, 0, var(--shadowB));
+}
+
+/* Optional premium “glass” (only when supported) */
+@supports ((-webkit-backdrop-filter: blur(10px)) or (backdrop-filter: blur(10px))) {
+  #playlist-ui .rnbo-top {
+    -webkit-backdrop-filter: blur(calc(10px * var(--sep)));
+    backdrop-filter: blur(calc(10px * var(--sep)));
+  }
+}
+
+/* Fade overlay so content scrolls "under" the header */
+#playlist-ui .rnbo-top::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: var(--fadeH);
+
+  /* matches background but fades out */
+  background: linear-gradient(
+    to bottom,
+    rgba(24, 24, 24, var(--fadeStart)),
+    rgba(24, 24, 24, 0)
+  );
+
+  pointer-events: none;
 }
 
 /* Scroll region */
@@ -224,13 +263,16 @@ body {
 }
 
 /* ==========================================================
-   MOBILE: make header not eat the planet
+   MOBILE: make header not eat the planet + lighter premium
    ========================================================== */
 @media (max-width: 480px) {
   #playlist-ui .rnbo-top {
     padding: 16px 16px 10px 16px;
-    max-height: 60%;     /* guaranteed room for scroll region */
+    max-height: 60%;
     overflow: hidden;
+
+    /* slightly reduced fade on small screens */
+    --fadeH: 20px;
   }
 
   #playlist-ui .rnbo-scroll {
