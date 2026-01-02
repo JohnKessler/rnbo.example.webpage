@@ -29,7 +29,7 @@
   const WAVE_H = 80;
 
   const PLAYHEAD_THROTTLE_MS = 16; // ~60fps
-  const DEFAULT_OUTGAIN = 128;
+  const DEFAULT_OUTGAIN = 112;
 
   // Drag reorder persistence
   const ORDER_KEY = "rnbo_playlist_order_v2";
@@ -261,7 +261,7 @@
       createEl("span", { innerText: "Loop" })
     ]);
 
-    const rate = createEl("input", { className: "rnbo-slider", type: "range", min: -4, max: 4, step: 0.01, value: 1 });
+    const rate = createEl("input", { className: "rnbo-slider", type: "range", min: -1, max: 2, step: 0.01, value: 1 });
     const rateVal = createEl("span", { className: "rnbo-readout", innerText: "1.00x" });
     const rateLabel = createEl("label", { className: "rnbo-label" }, [
       createEl("span", { innerText: "Speed" }),
