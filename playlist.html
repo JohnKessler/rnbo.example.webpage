@@ -5,24 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Playlist</title>
 
-  <!-- Minimal styling so it doesn't inherit weird defaults -->
+  <!-- Playlist UI skin -->
+  <link rel="stylesheet" href="css/playlist.css">
+
+  <!-- Minimal safety reset (optional but recommended) -->
   <style>
-    html, body { margin: 0; padding: 0; background: transparent; }
-    body { font-family: 'Source Sans Pro', sans-serif; color: #fff; }
-    /* Center the widget nicely inside iframe */
-    .wrap {
-      display: flex;
-      justify-content: center;
-      padding: 2rem;
-      box-sizing: border-box;
-    }
-    /* Give it a Reframe-like surface so text is readable */
-    #playlist-ui {
-      width: min(90rem, 100%);
-      background: #181818;
-      border: 1px solid rgba(255,255,255,.25);
-      padding: 4rem;
-      box-sizing: border-box;
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
     }
   </style>
 </head>
@@ -32,7 +23,7 @@
     <div id="playlist-ui"></div>
   </div>
 
-  <!-- Load only what you need -->
+  <!-- RNBO runtime + playlist UI -->
   <script src="js/app.js"></script>
   <script src="js/playlist-ui.js"></script>
 </body>
