@@ -2,12 +2,10 @@
 // RNBO Playlist UI (Web Export) — Reframe-integrated baseline
 //
 // Updates in this version:
-// - INJECT_DEFAULT_STYLES = false (site/theme CSS controls look)
-// - Play/Stop are round icon buttons (Reframe .icon-button style hook)
 // - Keeps all known-good functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
 //   drag reorder + persistence, keyboard shortcuts, touch-friendly interactions, volume via outGain.
-// - NEW: "Prime audio" on first Play so AudioContext resumes + RNBO node is connected (fixes silent playback
-//        when using a minimal playlist.html instead of the export's default index.html).
+// - "Prime audio" on first Play so AudioContext resumes + RNBO node is connected.
+// - NEW LAYOUT: Fixed top controls/header region; only the playlist rows scroll.
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
@@ -147,7 +145,6 @@
     return peaks;
   }
 
-  // playhead01 is intentionally normalized 0..1 for drawing
   function drawWaveform(canvas, peaks, playhead01) {
     const ctx = canvas.getContext("2d");
     const w = canvas.width;
@@ -221,7 +218,7 @@
   }
 
   // ----------------------------
-  // UI creation
+  // UI creation (NEW: top fixed region + scrolling list region)
   // ----------------------------
   function buildUI() {
     injectStyleOnce();
@@ -233,14 +230,14 @@
       document.body.appendChild(root);
     }
 
+    const top = createEl("div", { className: "rnbo-top" });
+    const scroll = createEl("div", { className: "rnbo-scroll" });
+
     const title = createEl("div", { className: "rnbo-title", innerText: "Playlist" });
 
     const progressLabel = createEl("div", { className: "rnbo-readout", innerText: "Preload: 0%" });
     const progress = createEl("progress", { className: "rnbo-progress", value: 0, max: 1 });
 
-    // Reframe-style icon buttons:
-    // - We add both classes: "icon-button" (theme) + "rnbo-iconbtn" (scoped hook)
-    // - Use simple inline SVG icons (no external icon fonts needed)
     const btnPlay = createEl("button", {
       className: "icon-button rnbo-iconbtn rnbo-play",
       type: "button",
@@ -291,16 +288,22 @@
     const list = createEl("div", { className: "rnbo-list" });
 
     root.innerHTML = "";
-    root.appendChild(title);
-    root.appendChild(progressLabel);
-    root.appendChild(progress);
-    root.appendChild(controls);
-    root.appendChild(playheadReadout);
-    root.appendChild(hint);
-    root.appendChild(list);
+    top.appendChild(title);
+    top.appendChild(progressLabel);
+    top.appendChild(progress);
+    top.appendChild(controls);
+    top.appendChild(playheadReadout);
+    top.appendChild(hint);
+
+    scroll.appendChild(list);
+
+    root.appendChild(top);
+    root.appendChild(scroll);
 
     return {
       root,
+      top,
+      scroll,
       progress,
       progressLabel,
       btnPlay,
@@ -335,7 +338,6 @@
   function svgEl(tag, attrs, children = []) {
     const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
     for (const [k, v] of Object.entries(attrs || {})) {
-      // HTML ariaHidden maps to aria-hidden
       if (k === "ariaHidden") el.setAttribute("aria-hidden", String(v));
       else el.setAttribute(k, String(v));
     }
@@ -358,25 +360,21 @@
     const pOutGain = ensureParam(device, "outGain");
 
     // ----------------------------
-    // PRIME AUDIO (new)
+    // PRIME AUDIO
     // ----------------------------
     let audioPrimed = false;
     async function primeAudio() {
       if (audioPrimed) return;
 
-      // Resume WebAudio context (autoplay policy safe because called from a user gesture)
       if (context && context.state !== "running") {
         await context.resume();
       }
 
-      // Ensure RNBO node is connected (some minimal pages omit the default UI wiring)
       try {
         if (device?.node && context?.destination) {
           device.node.connect(context.destination);
         }
-      } catch (_) {
-        // ignore errors like "already connected"
-      }
+      } catch (_) {}
 
       audioPrimed = true;
     }
@@ -438,9 +436,6 @@
     // Default selection
     let selectedName = items[0]?.name || null;
 
-    // ----------------------------
-    // Selection helpers
-    // ----------------------------
     function getSelectedIndex() {
       const idx = items.findIndex(it => it.name === selectedName);
       return idx >= 0 ? idx : 0;
@@ -481,7 +476,6 @@
     async function selectByIndex(idx) {
       idx = Math.max(0, Math.min(items.length - 1, idx));
 
-      // Stop before switching to keep state sane
       if (isPlaying) {
         pulseParam(pStopTrig);
         isPlaying = false;
@@ -505,7 +499,7 @@
 
       renderList();
       saveOrder(items.map(it => it.name));
-      pClipIndex.value = getSelectedIndex(); // keep RNBO param consistent
+      pClipIndex.value = getSelectedIndex();
     }
 
     function attachDragHandlers() {
@@ -602,10 +596,7 @@
     // ----------------------------
     async function doPlay() {
       endedAndStopped = false;
-
-      // NEW: ensure audio context is running and RNBO is connected
       await primeAudio();
-
       isPlaying = true;
       pulseParam(pPlayTrig);
     }
@@ -639,7 +630,7 @@
       ui.volVal.innerText = String(v);
     });
 
-    // Default gain as requested
+    // Default gain
     pOutGain.value = DEFAULT_OUTGAIN;
     ui.vol.value = String(DEFAULT_OUTGAIN);
     ui.volVal.innerText = String(DEFAULT_OUTGAIN);
@@ -650,7 +641,7 @@
     ui.loopToggle.checked = (pLoop.value ?? 0) >= 0.5;
 
     // ----------------------------
-    // Playhead subscriber (baseline-correct)
+    // Playhead subscriber
     // ----------------------------
     let lastPaint = 0;
     device.messageEvent.subscribe((ev) => {
@@ -659,7 +650,6 @@
       const ms = Array.isArray(ev.payload) ? (ev.payload[0] ?? 0) : ev.payload;
       const now = performance.now();
 
-      // Infer playing on forward motion
       if (ms > lastPlayheadMs + 1) {
         isPlaying = true;
         endedAndStopped = false;
@@ -667,7 +657,6 @@
 
       const loopOn = (pLoop.value ?? 0) >= 0.5;
 
-      // EOF detection: ms returns to 0 after advancing, loop OFF
       if (!loopOn && !endedAndStopped && ms <= 0 && lastPlayheadMs > 0) {
         pulseParam(pStopTrig);
         isPlaying = false;
@@ -681,10 +670,8 @@
 
       lastPlayheadMs = ms;
 
-      // If we're not playing, ignore paint/readout updates
       if (!isPlaying) return;
 
-      // Throttle drawing
       if (now - lastPaint < PLAYHEAD_THROTTLE_MS) return;
       lastPaint = now;
 
