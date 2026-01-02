@@ -1,14 +1,15 @@
 /* ==========================================================
    RNBO Playlist UI – Reframe Dark Skin
+   iOS Safari iframe-safe: NO vh/dvh inside iframe
    ========================================================== */
 
 /* ---- Reset / base ---- */
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  height: 100%;            /* iframe-driven height */
   background: transparent;
-  overflow: hidden; /* internal list scrolls, not the whole page */
+  overflow: hidden;        /* internal list scrolls, not the page */
   -webkit-text-size-adjust: 100%;
 }
 
@@ -17,48 +18,29 @@ body {
   color: #fff;
 }
 
-/* iOS Safari viewport sanity:
-   - 100vh can be wrong while address bar shows/hides
-   - prefer 100dvh where supported
-*/
-:root {
-  --vh: 100vh;
-}
-
-@supports (height: 100dvh) {
-  :root { --vh: 100dvh; }
-}
-
-/* Older iOS fallback */
-@supports (-webkit-touch-callout: none) {
-  html, body {
-    height: -webkit-fill-available;
-  }
-}
-
 /* ---- Outer centering ---- */
 .wrap {
   display: flex;
   justify-content: center;
   padding: 0;
-  height: var(--vh);
+  height: 100%;            /* iframe-driven height */
   box-sizing: border-box;
 }
 
 /* ---- Main container ---- */
 #playlist-ui {
   width: min(90rem, 100%);
-  height: var(--vh);
+  height: 100%;            /* IMPORTANT: use iframe height, not vh */
   background: #181818;
   border: 1px solid rgba(255,255,255,.25);
   box-sizing: border-box;
 
   display: flex;
   flex-direction: column;
-  overflow: hidden; /* prevent page scrollbars */
+  overflow: hidden;        /* prevent outer scrollbars */
 }
 
-/* NEW: fixed top region */
+/* Fixed top region */
 #playlist-ui .rnbo-top {
   padding: 6rem;
   box-sizing: border-box;
@@ -69,20 +51,19 @@ body {
   background: #181818;
 }
 
-/* NEW: scroll region */
+/* Scroll region */
 #playlist-ui .rnbo-scroll {
   padding: 0 6rem 6rem 6rem;
   box-sizing: border-box;
 
   flex: 1 1 auto;
-  min-height: 0;      /* critical: allows scrolling area to actually exist */
+  min-height: 0;                 /* critical for flex scroll */
   overflow-y: auto;
   overflow-x: hidden;
 
   position: relative;
   z-index: 1;
 
-  /* iOS smooth scrolling */
   -webkit-overflow-scrolling: touch;
 }
 
@@ -111,7 +92,7 @@ body {
   margin-bottom: 3rem;
 }
 
-/* ---- Icon buttons (Play / Stop) ---- */
+/* ---- Icon buttons ---- */
 #playlist-ui .rnbo-btn {
   width: 5.6rem;
   height: 5.6rem;
@@ -130,7 +111,7 @@ body {
 #playlist-ui .rnbo-btn:hover { background: #181818; }
 #playlist-ui .rnbo-btn:active { transform: translateY(1px); }
 
-/* ---- Loop checkbox label ---- */
+/* ---- Labels ---- */
 #playlist-ui .rnbo-label {
   display: inline-flex;
   align-items: center;
@@ -150,7 +131,6 @@ body {
   height: 0.1rem;
   background: rgba(255,255,255,.25);
 }
-
 #playlist-ui .rnbo-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 2.6rem;
@@ -166,7 +146,6 @@ body {
   height: 0.1rem;
   background: rgba(255,255,255,.25);
 }
-
 #playlist-ui .rnbo-slider::-moz-range-thumb {
   width: 2.6rem;
   height: 2.6rem;
@@ -202,10 +181,7 @@ body {
   padding-bottom: 4rem;
   border-bottom: 1px solid rgba(255,255,255,.25);
 }
-
-#playlist-ui .rnbo-row.selected {
-  border-bottom-color: #fff;
-}
+#playlist-ui .rnbo-row.selected { border-bottom-color: #fff; }
 
 /* ---- Row header ---- */
 #playlist-ui .rnbo-row-header {
@@ -248,23 +224,17 @@ body {
 }
 
 /* ==========================================================
-   MOBILE FIXES (iPhone / small Safari)
-   - Make header compact so scroll area exists
-   - Avoid 60px padding swallowing the viewport
+   MOBILE: make header not eat the planet
    ========================================================== */
 @media (max-width: 480px) {
   #playlist-ui .rnbo-top {
     padding: 16px 16px 10px 16px;
+    max-height: 60%;     /* guaranteed room for scroll region */
+    overflow: hidden;
   }
 
   #playlist-ui .rnbo-scroll {
     padding: 0 16px 16px 16px;
-  }
-
-  /* Keep header from ever eating the entire screen */
-  #playlist-ui .rnbo-top {
-    max-height: 58vh; /* ensures scroll region remains touchable */
-    overflow: hidden;
   }
 
   #playlist-ui .rnbo-controls {
@@ -272,20 +242,12 @@ body {
     margin-bottom: 12px;
   }
 
-  #playlist-ui .rnbo-label {
-    font-size: 16px;
-    gap: 8px;
-  }
-
+  #playlist-ui .rnbo-label { font-size: 16px; gap: 8px; }
   #playlist-ui .rnbo-readout,
   #playlist-ui .rnbo-hint,
-  #playlist-ui .rnbo-meta {
-    font-size: 14px;
-  }
+  #playlist-ui .rnbo-meta { font-size: 14px; }
 
-  #playlist-ui .rnbo-slider {
-    width: 160px;
-  }
+  #playlist-ui .rnbo-slider { width: 160px; }
 
   #playlist-ui .rnbo-btn,
   #playlist-ui .rnbo-iconbtn {
@@ -298,17 +260,11 @@ body {
     gap: 20px;
   }
 
-  #playlist-ui .rnbo-row {
-    padding-bottom: 18px;
-  }
-
-  #playlist-ui .rnbo-handle {
-    width: 44px;
-    height: 44px;
-  }
+  #playlist-ui .rnbo-row { padding-bottom: 18px; }
+  #playlist-ui .rnbo-handle { width: 44px; height: 44px; }
 }
 
-/* Your existing "tablet-ish" breakpoint */
+/* Existing tablet-ish breakpoint */
 @media (max-width: 844px) {
   #playlist-ui .rnbo-top { padding: 60px; }
   #playlist-ui .rnbo-scroll { padding: 0 60px 60px 60px; }
