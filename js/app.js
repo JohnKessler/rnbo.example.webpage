@@ -1,37 +1,63 @@
+// app.js (patched for null-safe DOM access + DOM-ready init + promise error handling)
+//
+// What changed vs your original:
+// - Adds helper functions: $(id), setText(id, text), removeIf(parentId, childId), safeRemoveChild(parent, child)
+// - Makes "patcher-title" write null-safe (fixes your Firefox console error)
+// - Wraps setup() call so async errors don't become "Uncaught (in promise)"
+// - Runs setup after DOMContentLoaded (more reliable timing across browsers)
+// - Adds a few extra null checks in optional UI sections
+
 async function setup() {
     const patchExportURL = "export/patch.export.json";
 
+    // ----------------------------
+    // DOM helpers (null-safe)
+    // ----------------------------
+    const $ = (id) => document.getElementById(id);
+
+    const setText = (id, text) => {
+        const el = $(id);
+        if (el) el.innerText = text;
+        return !!el;
+    };
+
+    const safeRemoveChild = (parent, child) => {
+        if (parent && child && child.parentNode === parent) parent.removeChild(child);
+    };
+
+    const removeIf = (parentId, childId) => {
+        safeRemoveChild($(parentId), $(childId));
+    };
+
+    // ----------------------------
     // Create AudioContext
+    // ----------------------------
     const WAContext = window.AudioContext || window.webkitAudioContext;
     const context = new WAContext();
 
     // Create gain node and connect it to audio output
     const outputNode = context.createGain();
     outputNode.connect(context.destination);
-    
+
     // Fetch the exported patcher
     let response, patcher;
     try {
         response = await fetch(patchExportURL);
         patcher = await response.json();
-    
+
         if (!window.RNBO) {
             // Load RNBO script dynamically
-            // Note that you can skip this by knowing the RNBO version of your patch
-            // beforehand and just include it using a <script> tag
             await loadRNBOScript(patcher.desc.meta.rnboversion);
         }
-
     } catch (err) {
-        const errorContext = {
-            error: err
-        };
+        const errorContext = { error: err };
         if (response && (response.status >= 300 || response.status < 200)) {
-            errorContext.header = `Couldn't load patcher export bundle`,
-            errorContext.description = `Check app.js to see what file it's trying to load. Currently it's` +
-            ` trying to load "${patchExportURL}". If that doesn't` + 
-            ` match the name of the file you exported from RNBO, modify` + 
-            ` patchExportURL in app.js.`;
+            errorContext.header = `Couldn't load patcher export bundle`;
+            errorContext.description =
+                `Check app.js to see what file it's trying to load. Currently it's` +
+                ` trying to load "${patchExportURL}". If that doesn't` +
+                ` match the name of the file you exported from RNBO, modify` +
+                ` patchExportURL in app.js.`;
         }
         if (typeof guardrails === "function") {
             guardrails(errorContext);
@@ -40,16 +66,18 @@ async function setup() {
         }
         return;
     }
-    
+
     // (Optional) Fetch the dependencies
     let dependencies = [];
     try {
         const dependenciesResponse = await fetch("export/dependencies.json");
         dependencies = await dependenciesResponse.json();
 
-        // Prepend "export" to any file dependenciies
-        dependencies = dependencies.map(d => d.file ? Object.assign({}, d, { file: "export/" + d.file }) : d);
-    } catch (e) {}
+        // Prepend "export" to any file dependencies
+        dependencies = dependencies.map(d => (d.file ? Object.assign({}, d, { file: "export/" + d.file }) : d));
+    } catch (e) {
+        // Optional; ignore
+    }
 
     // Create the device
     let device;
@@ -65,18 +93,24 @@ async function setup() {
     }
 
     // (Optional) Load the samples
-    if (dependencies.length)
+    if (dependencies.length) {
         await device.loadDataBufferDependencies(dependencies);
+    }
 
     // Connect the device to the web audio graph
     device.node.connect(outputNode);
 
-	// After device.node.connect(outputNode);
-	if (window.initPlaylistUI)
-  		await window.initPlaylistUI(device, context);
+    // Initialize your playlist UI if present
+    if (window.initPlaylistUI) {
+        await window.initPlaylistUI(device, context);
+    }
 
     // (Optional) Extract the name and rnbo version of the patcher from the description
-    document.getElementById("patcher-title").innerText = (patcher.desc.meta.filename || "Unnamed Patcher") + " (v" + patcher.desc.meta.rnboversion + ")";
+    // FIX: null-safe (this is the source of your Firefox error if #patcher-title doesn't exist)
+    setText(
+        "patcher-title",
+        (patcher?.desc?.meta?.filename || "Unnamed Patcher") + " (v" + (patcher?.desc?.meta?.rnboversion || "?") + ")"
+    );
 
     // (Optional) Automatically create sliders for the device parameters
     makeSliders(device);
@@ -93,24 +127,29 @@ async function setup() {
     // (Optional) Connect MIDI inputs
     makeMIDIKeyboard(device);
 
+    // Resume audio on any click/tap (kept as-is)
     document.body.onclick = () => {
         context.resume();
-    }
+    };
 
     // Skip if you're not using guardrails.js
-    if (typeof guardrails === "function")
-        guardrails();
+    if (typeof guardrails === "function") guardrails();
 }
 
 function loadRNBOScript(version) {
     return new Promise((resolve, reject) => {
         if (/^\d+\.\d+\.\d+-dev$/.test(version)) {
-            throw new Error("Patcher exported with a Debug Version!\nPlease specify the correct RNBO version to use in the code.");
+            throw new Error(
+                "Patcher exported with a Debug Version!\nPlease specify the correct RNBO version to use in the code."
+            );
         }
         const el = document.createElement("script");
-        el.src = "https://c74-public.nyc3.digitaloceanspaces.com/rnbo/" + encodeURIComponent(version) + "/rnbo.min.js";
+        el.src =
+            "https://c74-public.nyc3.digitaloceanspaces.com/rnbo/" +
+            encodeURIComponent(version) +
+            "/rnbo.min.js";
         el.onload = resolve;
-        el.onerror = function(err) {
+        el.onerror = function (err) {
             console.log(err);
             reject(new Error("Failed to load rnbo.js v" + version));
         };
@@ -119,22 +158,19 @@ function loadRNBOScript(version) {
 }
 
 function makeSliders(device) {
-    let pdiv = document.getElementById("rnbo-parameter-sliders");
-    let noParamLabel = document.getElementById("no-param-label");
-    if (noParamLabel && device.numParameters > 0) pdiv.removeChild(noParamLabel);
+    const pdiv = document.getElementById("rnbo-parameter-sliders");
+    if (!pdiv) return; // Null-safe: page might not have the slider container
+
+    const noParamLabel = document.getElementById("no-param-label");
+    if (noParamLabel && device.numParameters > 0 && noParamLabel.parentNode === pdiv) {
+        pdiv.removeChild(noParamLabel);
+    }
 
     // This will allow us to ignore parameter update events while dragging the slider.
     let isDraggingSlider = false;
     let uiElements = {};
 
     device.parameters.forEach(param => {
-        // Subpatchers also have params. If we want to expose top-level
-        // params only, the best way to determine if a parameter is top level
-        // or not is to exclude parameters with a '/' in them.
-        // You can uncomment the following line if you don't want to include subpatcher params
-        
-        //if (param.id.includes("/")) return;
-
         // Create a label, an input slider and a value display
         let label = document.createElement("label");
         let slider = document.createElement("input");
@@ -197,7 +233,7 @@ function makeSliders(device) {
             }
         });
 
-        // Store the slider and text by name so we can access them later
+        // Store the slider and text by id so we can access them later
         uiElements[param.id] = { slider, text };
 
         // Add the slider element
@@ -206,9 +242,10 @@ function makeSliders(device) {
 
     // Listen to parameter changes from the device
     device.parameterChangeEvent.subscribe(param => {
-        if (!isDraggingSlider)
-            uiElements[param.id].slider.value = param.value;
-        uiElements[param.id].text.value = param.value.toFixed(1);
+        const ui = uiElements[param.id];
+        if (!ui) return;
+        if (!isDraggingSlider) ui.slider.value = param.value;
+        ui.text.value = param.value.toFixed(1);
     });
 }
 
@@ -217,24 +254,29 @@ function makeInportForm(device) {
     const inportSelect = document.getElementById("inport-select");
     const inportText = document.getElementById("inport-text");
     const inportForm = document.getElementById("inport-form");
+    if (!idiv || !inportSelect || !inportText || !inportForm) return; // Null-safe
+
     let inportTag = null;
-    
+
     // Device messages correspond to inlets/outlets or inports/outports
-    // You can filter for one or the other using the "type" of the message
     const messages = device.messages;
     const inports = messages.filter(message => message.type === RNBO.MessagePortType.Inport);
 
     if (inports.length === 0) {
-        idiv.removeChild(document.getElementById("inport-form"));
+        const formEl = document.getElementById("inport-form");
+        if (formEl && formEl.parentNode === idiv) idiv.removeChild(formEl);
         return;
     } else {
-        idiv.removeChild(document.getElementById("no-inports-label"));
+        const noLabel = document.getElementById("no-inports-label");
+        if (noLabel && noLabel.parentNode === idiv) idiv.removeChild(noLabel);
+
         inports.forEach(inport => {
             const option = document.createElement("option");
             option.innerText = inport.tag;
             inportSelect.appendChild(option);
         });
-        inportSelect.onchange = () => inportTag = inportSelect.value;
+
+        inportSelect.onchange = () => (inportTag = inportSelect.value);
         inportTag = inportSelect.value;
 
         inportForm.onsubmit = (ev) => {
@@ -243,43 +285,58 @@ function makeInportForm(device) {
 
             // Turn the text into a list of numbers (RNBO messages must be numbers, not text)
             const values = inportText.value.split(/\s+/).map(s => parseFloat(s));
-            
+
             // Send the message event to the RNBO device
             let messageEvent = new RNBO.MessageEvent(RNBO.TimeNow, inportTag, values);
             device.scheduleEvent(messageEvent);
-        }
+        };
     }
 }
 
 function attachOutports(device) {
     const outports = device.outports;
+
+    const consoleRoot = document.getElementById("rnbo-console");
+    if (!consoleRoot) return; // Null-safe if your page doesn't include the console UI
+
     if (outports.length < 1) {
-        document.getElementById("rnbo-console").removeChild(document.getElementById("rnbo-console-div"));
+        const div = document.getElementById("rnbo-console-div");
+        if (div && div.parentNode === consoleRoot) consoleRoot.removeChild(div);
         return;
     }
 
-    document.getElementById("rnbo-console").removeChild(document.getElementById("no-outports-label"));
-    device.messageEvent.subscribe((ev) => {
+    const noOutLabel = document.getElementById("no-outports-label");
+    if (noOutLabel && noOutLabel.parentNode === consoleRoot) consoleRoot.removeChild(noOutLabel);
 
+    device.messageEvent.subscribe((ev) => {
         // Ignore message events that don't belong to an outport
         if (outports.findIndex(elt => elt.tag === ev.tag) < 0) return;
 
-        // Message events have a tag as well as a payload
         console.log(`${ev.tag}: ${ev.payload}`);
 
-        document.getElementById("rnbo-console-readout").innerText = `${ev.tag}: ${ev.payload}`;
+        // Null-safe readout update
+        const readout = document.getElementById("rnbo-console-readout");
+        if (readout) readout.innerText = `${ev.tag}: ${ev.payload}`;
     });
 }
 
 function loadPresets(device, patcher) {
+    const presetRoot = document.getElementById("rnbo-presets");
+    if (!presetRoot) return; // Null-safe
+
     let presets = patcher.presets || [];
     if (presets.length < 1) {
-        document.getElementById("rnbo-presets").removeChild(document.getElementById("preset-select"));
+        const presetSelect = document.getElementById("preset-select");
+        if (presetSelect && presetSelect.parentNode === presetRoot) presetRoot.removeChild(presetSelect);
         return;
     }
 
-    document.getElementById("rnbo-presets").removeChild(document.getElementById("no-presets-label"));
+    const noPresetsLabel = document.getElementById("no-presets-label");
+    if (noPresetsLabel && noPresetsLabel.parentNode === presetRoot) presetRoot.removeChild(noPresetsLabel);
+
     let presetSelect = document.getElementById("preset-select");
+    if (!presetSelect) return;
+
     presets.forEach((preset, index) => {
         const option = document.createElement("option");
         option.innerText = preset.name;
@@ -291,9 +348,11 @@ function loadPresets(device, patcher) {
 
 function makeMIDIKeyboard(device) {
     let mdiv = document.getElementById("rnbo-clickable-keyboard");
+    if (!mdiv) return; // Null-safe
     if (device.numMIDIInputPorts === 0) return;
 
-    mdiv.removeChild(document.getElementById("no-midi-label"));
+    const noMidi = document.getElementById("no-midi-label");
+    if (noMidi && noMidi.parentNode === mdiv) mdiv.removeChild(noMidi);
 
     const midiNotes = [49, 52, 56, 63];
     midiNotes.forEach(note => {
@@ -301,33 +360,29 @@ function makeMIDIKeyboard(device) {
         const label = document.createElement("p");
         label.textContent = note;
         key.appendChild(label);
+
         key.addEventListener("pointerdown", () => {
             let midiChannel = 0;
 
-            // Format a MIDI message paylaod, this constructs a MIDI on event
+            // Format a MIDI message payload, this constructs a MIDI on event
             let noteOnMessage = [
-                144 + midiChannel, // Code for a note on: 10010000 & midi channel (0-15)
-                note, // MIDI Note
-                100 // MIDI Velocity
+                144 + midiChannel, // Note on
+                note,              // MIDI Note
+                100                // Velocity
             ];
-        
+
             let noteOffMessage = [
-                128 + midiChannel, // Code for a note off: 10000000 & midi channel (0-15)
-                note, // MIDI Note
-                0 // MIDI Velocity
+                128 + midiChannel, // Note off
+                note,              // MIDI Note
+                0                  // Velocity
             ];
-        
-            // Including rnbo.min.js (or the unminified rnbo.js) will add the RNBO object
-            // to the global namespace. This includes the TimeNow constant as well as
-            // the MIDIEvent constructor.
+
             let midiPort = 0;
             let noteDurationMs = 250;
-        
-            // When scheduling an event to occur in the future, use the current audio context time
-            // multiplied by 1000 (converting seconds to milliseconds) for now.
+
             let noteOnEvent = new RNBO.MIDIEvent(device.context.currentTime * 1000, midiPort, noteOnMessage);
             let noteOffEvent = new RNBO.MIDIEvent(device.context.currentTime * 1000 + noteDurationMs, midiPort, noteOffMessage);
-        
+
             device.scheduleEvent(noteOnEvent);
             device.scheduleEvent(noteOffEvent);
 
@@ -335,9 +390,26 @@ function makeMIDIKeyboard(device) {
         });
 
         key.addEventListener("pointerup", () => key.classList.remove("clicked"));
-
         mdiv.appendChild(key);
     });
 }
 
-setup();
+// Run after DOM is ready, and catch async errors so they don't become "Uncaught (in promise)"
+(function init() {
+    const run = async () => {
+        try {
+            await setup();
+        } catch (err) {
+            console.error("RNBO setup failed:", err);
+            if (typeof guardrails === "function") {
+                guardrails({ error: err });
+            }
+        }
+    };
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", run, { once: true });
+    } else {
+        run();
+    }
+})();
