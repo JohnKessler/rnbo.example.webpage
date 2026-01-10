@@ -1,46 +1,36 @@
 /* ==========================================================
    RNBO Playlist UI – Tokenized Dark Skin (Penpot → CSS)
-   - iframe-safe: no vh/dvh dependency inside playlist container
-   - keeps existing class hooks used by playlist-ui.js
-   - uses Penpot-exported tokens as CSS variables
+   Full layout styles for header + transport + rows + waveform
    ========================================================== */
 
-/* ----------------------------------------------------------
-   0) Penpot Tokens (export: tokens.json)
-   ---------------------------------------------------------- */
 :root {
-  /* Surfaces */
-  --ui-surface: #181824;                 /* color.bg.surface */
-  --ui-surface-2: #1c1c2a;               /* color.bg.surface-2 */
-  --ui-surface-hover: #202036;           /* color.bg.surface-hover */
-  --ui-surface-active: #2a2a40;          /* color.bg.surface-active */
-  --ui-surface-drag: #3a3a55;            /* color.bg.surface-drag */
+  --ui-surface: #181824;
+  --ui-surface-2: #1c1c2a;
+  --ui-surface-hover: #202036;
+  --ui-surface-active: #2a2a40;
+  --ui-surface-drag: #3a3a55;
 
-  /* Text */
-  --ui-text: #ffffff;                    /* color.text.primary */
-  --ui-text-muted: rgba(255,255,255,0.6);/* color.text.muted */
-  --ui-text-faint: rgba(255,255,255,0.4);/* color.text.faint */
+  --ui-text: #ffffff;
+  --ui-text-muted: rgba(255,255,255,0.6);
+  --ui-text-faint: rgba(255,255,255,0.4);
 
-  /* Accents & lines */
-  --ui-accent: #d8d0ee;                  /* color.accent */
-  --ui-border: rgba(255,255,255,0.08);   /* color.border */
-  --ui-divider: rgba(255,255,255,0.06);  /* color.divider */
+  --ui-accent: #d8d0ee;
+  --ui-border: rgba(255,255,255,0.08);
+  --ui-divider: rgba(255,255,255,0.06);
 
-  /* Radius + spacing (project conventions) */
   --ui-radius: 10px;
   --ui-radius-pill: 999px;
 
-  --ui-pad-lg: 48px;   /* desktop-ish page padding */
-  --ui-pad-md: 16px;   /* mobile padding */
+  --ui-pad-lg: 48px;
+  --ui-pad-md: 16px;
+
   --ui-gap-lg: 24px;
   --ui-gap-md: 12px;
   --ui-gap-sm: 8px;
 
-  /* Controls sizing */
   --ui-btn: 56px;
   --ui-btn-m: 44px;
 
-  /* Typography (matches your Penpot “Title / Body / Meta” intent) */
   --ui-title-size: 16px;
   --ui-title-weight: 600;
   --ui-title-line: 1.2;
@@ -54,15 +44,12 @@
   --ui-meta-line: 1.2;
 }
 
-/* ----------------------------------------------------------
-   1) Reset / base
-   ---------------------------------------------------------- */
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;                 /* iframe-driven height */
+  height: 100%;
   background: transparent;
-  overflow: hidden;             /* internal list scrolls, not page */
+  overflow: hidden;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -71,7 +58,6 @@ body {
   color: var(--ui-text);
 }
 
-/* Outer centering */
 .wrap {
   display: flex;
   justify-content: center;
@@ -80,10 +66,9 @@ body {
   box-sizing: border-box;
 }
 
-/* Main container */
 #playlist-ui {
   width: min(90rem, 100%);
-  height: 100%;                 /* use iframe height, not vh */
+  height: 100%;
   background: var(--ui-surface);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius);
@@ -91,12 +76,12 @@ body {
 
   display: flex;
   flex-direction: column;
-  overflow: hidden;             /* prevent outer scrollbars */
+  overflow: hidden;
 }
 
-/* ----------------------------------------------------------
-   2) Fixed top region (header)
-   ---------------------------------------------------------- */
+/* ----------------------------
+   Header (fixed top region)
+   ---------------------------- */
 #playlist-ui .rnbo-top {
   padding: var(--ui-pad-lg);
   box-sizing: border-box;
@@ -105,12 +90,11 @@ body {
   position: relative;
   z-index: 2;
 
-  /* Premium defaults (JS may animate via CSS vars) */
-  --sep: 0;         /* 0..1 separation intensity */
-  --shadowA: 0;     /* opacity */
-  --shadowB: 0;     /* opacity */
+  --sep: 0;
+  --shadowA: 0;
+  --shadowB: 0;
   --fadeH: 28px;
-  --fadeStart: 0;   /* alpha */
+  --fadeStart: 0;
 
   background: rgba(24, 24, 36, calc(1 - (0.10 * var(--sep))));
   box-shadow:
@@ -118,7 +102,6 @@ body {
     0 2px 4px rgba(0, 0, 0, var(--shadowB));
 }
 
-/* Optional “glass” */
 @supports ((-webkit-backdrop-filter: blur(10px)) or (backdrop-filter: blur(10px))) {
   #playlist-ui .rnbo-top {
     -webkit-backdrop-filter: blur(calc(10px * var(--sep)));
@@ -126,7 +109,6 @@ body {
   }
 }
 
-/* Fade overlay so content scrolls "under" the header */
 #playlist-ui .rnbo-top::after {
   content: "";
   position: absolute;
@@ -142,57 +124,85 @@ body {
   pointer-events: none;
 }
 
-/* ----------------------------------------------------------
-   3) Scroll region
-   ---------------------------------------------------------- */
-#playlist-ui .rnbo-scroll {
-  padding: 0 var(--ui-pad-lg) var(--ui-pad-lg) var(--ui-pad-lg);
-  box-sizing: border-box;
-
-  flex: 1 1 auto;
-  min-height: 0;                  /* critical for flex scroll */
-  overflow-y: auto;
-  overflow-x: hidden;
-
-  position: relative;
-  z-index: 1;
-
-  -webkit-overflow-scrolling: touch;
+/* Title row */
+#playlist-ui .header-row-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-gap-md);
+  margin-bottom: 10px;
 }
 
-/* ----------------------------------------------------------
-   4) Headings / readouts
-   ---------------------------------------------------------- */
-#playlist-ui h1,
-#playlist-ui h2,
-#playlist-ui h3 {
-  margin: 0 0 16px 0;
+#playlist-ui .title-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#playlist-ui .rnbo-title {
+  margin: 0;
   font-weight: var(--ui-title-weight);
   font-size: var(--ui-title-size);
   line-height: var(--ui-title-line);
   color: var(--ui-accent);
 }
 
-#playlist-ui .rnbo-readout,
-#playlist-ui .rnbo-hint,
 #playlist-ui .rnbo-meta {
   color: var(--ui-text-muted);
   font-size: 14px;
   line-height: 1.48;
 }
 
-/* ----------------------------------------------------------
-   5) Controls bar
-   ---------------------------------------------------------- */
-#playlist-ui .rnbo-controls {
+#playlist-ui .status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: var(--ui-radius-pill);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-surface-2);
+  color: var(--ui-text);
+  font-size: var(--ui-meta-size);
+}
+
+/* Transport row */
+#playlist-ui .header-row-transport {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: var(--ui-gap-md);
   margin-bottom: 12px;
 }
 
-/* Icon buttons */
+#playlist-ui .transport-left {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-gap-md);
+}
+
+#playlist-ui .transport-spacer {
+  flex: 1 1 auto;
+  min-width: 12px;
+}
+
+#playlist-ui .volume-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#playlist-ui .rnbo-voltag {
+  color: var(--ui-text-muted);
+  font-size: var(--ui-meta-size);
+  letter-spacing: 0.06em;
+}
+
+#playlist-ui .rnbo-volreadout {
+  color: var(--ui-text-muted);
+  font-size: 14px;
+  min-width: 2.5em;
+  text-align: right;
+}
+
+/* Buttons */
 #playlist-ui .rnbo-btn {
   width: var(--ui-btn);
   height: var(--ui-btn);
@@ -204,36 +214,24 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
   user-select: none;
 }
 
 #playlist-ui .rnbo-btn:hover { background: var(--ui-surface-hover); }
 #playlist-ui .rnbo-btn:active { transform: translateY(1px); }
 
-/* Optional “on” state hook (safe even if JS never uses it) */
 #playlist-ui .rnbo-btn.is-on {
   border-color: var(--ui-accent);
   box-shadow: 0 0 0 2px rgba(216, 208, 238, 0.18);
 }
 
-/* Labels */
-#playlist-ui .rnbo-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--ui-text-muted);
-  font-size: 14px;
-}
-
-/* Sliders */
+/* Slider */
 #playlist-ui .rnbo-slider {
   width: 280px;
   background: none;
   accent-color: var(--ui-accent);
 }
 
-/* WebKit slider */
 #playlist-ui .rnbo-slider::-webkit-slider-runnable-track {
   height: 2px;
   background: var(--ui-border);
@@ -248,8 +246,6 @@ body {
   cursor: pointer;
   border: 1px solid rgba(0,0,0,0.25);
 }
-
-/* Firefox slider */
 #playlist-ui .rnbo-slider::-moz-range-track {
   height: 2px;
   background: var(--ui-border);
@@ -263,27 +259,72 @@ body {
   cursor: pointer;
 }
 
-/* ----------------------------------------------------------
-   6) Progress bar
-   ---------------------------------------------------------- */
-#playlist-ui .rnbo-progress {
+/* Progress row */
+#playlist-ui .header-row-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#playlist-ui .progress-track {
+  position: relative;
   width: 100%;
   height: 10px;
   background: var(--ui-surface-2);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-pill);
-  margin-top: 12px;
   overflow: hidden;
 }
 
-/* If <progress> is used */
-#playlist-ui progress::-webkit-progress-value { background: var(--ui-accent); }
-#playlist-ui progress::-webkit-progress-bar { background: var(--ui-surface-2); }
-#playlist-ui progress::-moz-progress-bar { background: var(--ui-accent); }
+#playlist-ui .progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--ui-accent);
+}
 
-/* ----------------------------------------------------------
-   7) Playlist list
-   ---------------------------------------------------------- */
+#playlist-ui .progress-handle {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-text);
+  border: 1px solid rgba(0,0,0,0.25);
+  left: 0%;
+  pointer-events: none;
+}
+
+#playlist-ui .time-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ui-text-muted);
+  font-size: var(--ui-meta-size);
+}
+
+#playlist-ui .time-spacer {
+  flex: 1 1 auto;
+}
+
+/* ----------------------------
+   Scroll region
+   ---------------------------- */
+#playlist-ui .rnbo-scroll {
+  padding: 0 var(--ui-pad-lg) var(--ui-pad-lg) var(--ui-pad-lg);
+  box-sizing: border-box;
+
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  position: relative;
+  z-index: 1;
+
+  -webkit-overflow-scrolling: touch;
+}
+
 #playlist-ui .rnbo-list {
   display: flex;
   flex-direction: column;
@@ -291,34 +332,54 @@ body {
   margin-top: 18px;
 }
 
-/* Playlist row (existing class used by your UI) */
+/* ----------------------------
+   Playlist rows
+   ---------------------------- */
 #playlist-ui .rnbo-row {
-  padding-bottom: 18px;
+  padding: 14px 0 18px 0;
   border-bottom: 1px solid var(--ui-divider);
 }
 
-/* Selected row hook (existing) */
-#playlist-ui .rnbo-row.selected {
-  border-bottom-color: var(--ui-accent);
-}
-
-/* Optional state hooks (safe if unused) */
+#playlist-ui .rnbo-row.selected,
 #playlist-ui .rnbo-row.is-active {
   border-bottom-color: var(--ui-accent);
 }
+
+#playlist-ui .rnbo-row.dragging,
 #playlist-ui .rnbo-row.is-dragging {
-  background: var(--ui-surface-drag);
+  background: rgba(58, 58, 85, 0.35);
 }
 
-/* Row header */
+/* Header area inside row */
 #playlist-ui .rnbo-row-header {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 14px;
   margin-bottom: 10px;
 }
 
-/* Drag handle */
+/* Left stack (index + handle) */
+#playlist-ui .rnbo-left-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+#playlist-ui .rnbo-index {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--ui-radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--ui-meta-size);
+  color: var(--ui-text);
+  background: var(--ui-surface-active);
+  border: 1px solid var(--ui-border);
+}
+
 #playlist-ui .rnbo-handle {
   width: var(--ui-btn);
   height: var(--ui-btn);
@@ -331,6 +392,13 @@ body {
   justify-content: center;
   cursor: grab;
   user-select: none;
+  padding: 0;
+}
+
+#playlist-ui .rnbo-handle span {
+  color: var(--ui-text-faint);
+  font-size: 12px;
+  letter-spacing: 0.08em;
 }
 
 #playlist-ui .rnbo-handle:hover {
@@ -339,26 +407,35 @@ body {
 }
 #playlist-ui .rnbo-handle:active { cursor: grabbing; }
 
-/* Filename */
-#playlist-ui .rnbo-filename {
+/* Info stack */
+#playlist-ui .rnbo-item-info {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+#playlist-ui .rnbo-item-title {
   color: var(--ui-text);
   font-size: var(--ui-body-size);
   line-height: var(--ui-body-line);
-  letter-spacing: -0.005em;
   font-weight: var(--ui-body-weight);
   word-break: break-word;
 }
 
-/* Meta (if present in markup) */
-#playlist-ui .rnbo-item-meta,
-#playlist-ui .rnbo-meta-inline {
+#playlist-ui .rnbo-item-meta {
   color: var(--ui-text-muted);
   font-size: var(--ui-meta-size);
   line-height: var(--ui-meta-line);
   font-weight: var(--ui-meta-weight);
 }
 
-/* Waveform canvas */
+/* Waveform */
+#playlist-ui .rnbo-waveform {
+  width: 100%;
+}
+
 #playlist-ui .rnbo-canvas {
   width: 100%;
   height: auto;
@@ -367,12 +444,12 @@ body {
   border-radius: 6px;
 }
 
-/* ----------------------------------------------------------
-   8) Mobile tuning
-   ---------------------------------------------------------- */
+/* ----------------------------
+   Mobile tuning
+   ---------------------------- */
 @media (max-width: 480px) {
   #playlist-ui {
-    border-radius: 0; /* optional: makes iframe edge-to-edge feel nicer */
+    border-radius: 0;
   }
 
   #playlist-ui .rnbo-top {
@@ -385,16 +462,6 @@ body {
   #playlist-ui .rnbo-scroll {
     padding: 0 16px 16px 16px;
   }
-
-  #playlist-ui .rnbo-controls {
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-
-  #playlist-ui .rnbo-label { font-size: 14px; gap: 8px; }
-  #playlist-ui .rnbo-readout,
-  #playlist-ui .rnbo-hint,
-  #playlist-ui .rnbo-meta { font-size: 13px; }
 
   #playlist-ui .rnbo-slider { width: 160px; }
 
@@ -412,7 +479,6 @@ body {
   #playlist-ui .rnbo-row { padding-bottom: 16px; }
 }
 
-/* Tablet-ish breakpoint (kept, but tokenized spacing) */
 @media (max-width: 844px) {
   #playlist-ui .rnbo-top { padding: 36px; }
   #playlist-ui .rnbo-scroll { padding: 0 36px 36px 36px; }
