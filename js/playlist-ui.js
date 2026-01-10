@@ -1,11 +1,11 @@
 // playlist-ui.js
-// RNBO Playlist UI — full header UI + working progress + rate slider + preload %
+// RNBO Playlist UI — progress + rate + preload fade + loop-aware playhead wrap/stop
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
 // Expected RNBO external buffer name:
 //   "sample"
-// Expected port message tag (outport) for playhead:
+// Expected port message tag (outport):
 //   "playhead" with ms as payload[0]
 
 (function () {
@@ -22,6 +22,13 @@
   const WAVE_H = 80;
 
   const PLAYHEAD_THROTTLE_MS = 16;
+
+  // Preload fade timing
+  const PRELOAD_FADE_DELAY_MS = 900;   // wait after "complete"
+  const PRELOAD_FADE_DURATION_MS = 600;
+
+  // Loop end detection slack (ms)
+  const END_EPS_MS = 25;
 
   // ----------------------------
   // Helpers
@@ -53,7 +60,9 @@
 
   function pulseParam(param, ms = 20) {
     param.value = 1;
-    setTimeout(() => { param.value = 0; }, ms);
+    setTimeout(() => {
+      param.value = 0;
+    }, ms);
   }
 
   async function fetchJSON(url) {
@@ -69,7 +78,9 @@
   }
 
   function saveOrder(names) {
-    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+    } catch (_) {}
   }
 
   function loadOrder() {
@@ -135,7 +146,8 @@
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1, max = -1;
+      let min = 1,
+        max = -1;
       const start = x * spp;
       const end = Math.min(len, (x + 1) * spp);
       for (let i = start; i < end; i++) {
@@ -269,7 +281,7 @@
       volumeGroup
     );
 
-    // Row: Progress + time (this is the one you want moving)
+    // Row: Progress + time
     const headerRowProgress = createEl("div", { className: "header-row-progress" });
 
     const progressTrack = createEl("div", { className: "progress-track" }, [
@@ -321,7 +333,7 @@
   }
 
   // ----------------------------
-  // Init (called by app.js)
+  // Init
   // ----------------------------
   async function initPlaylistUI(device, context) {
     const ui = buildUI();
@@ -342,6 +354,7 @@
         if (context && context.state !== "running") await context.resume();
       } catch (_) {}
     }
+
     ["pointerdown", "click"].forEach((evt) => {
       ui.btnPlay.addEventListener(evt, primeAudio, { passive: true });
       ui.btnStop.addEventListener(evt, primeAudio, { passive: true });
@@ -351,7 +364,7 @@
     });
 
     // ----------------------------
-    // Bind RATE slider to RNBO param (auto range)
+    // Bind RATE (auto range)
     // ----------------------------
     const rateMin = Number.isFinite(pRate.min) ? pRate.min : 0.25;
     const rateMax = Number.isFinite(pRate.max) ? pRate.max : 2.0;
@@ -359,11 +372,11 @@
 
     ui.rate.min = String(rateMin);
     ui.rate.max = String(rateMax);
-    ui.rate.step = rateSteps && rateSteps > 1
-      ? String((rateMax - rateMin) / (rateSteps - 1))
-      : String((rateMax - rateMin) / 1000);
+    ui.rate.step =
+      rateSteps && rateSteps > 1
+        ? String((rateMax - rateMin) / (rateSteps - 1))
+        : String((rateMax - rateMin) / 1000);
 
-    // initialize from param
     ui.rate.value = String(pRate.value);
     ui.rateVal.innerText = `${Number(pRate.value).toFixed(2)}×`;
 
@@ -374,7 +387,7 @@
     });
 
     // ----------------------------
-    // Bind VOL slider to RNBO outGain param (auto range)
+    // Bind VOL (auto range)
     // ----------------------------
     const outMin = Number.isFinite(pOutGain.min) ? pOutGain.min : 0;
     const outMax = Number.isFinite(pOutGain.max) ? pOutGain.max : 1;
@@ -382,11 +395,15 @@
 
     ui.vol.min = String(outMin);
     ui.vol.max = String(outMax);
-    ui.vol.step = outSteps && outSteps > 1
-      ? String((outMax - outMin) / (outSteps - 1))
-      : String((outMax - outMin) / 1000);
+    ui.vol.step =
+      outSteps && outSteps > 1
+        ? String((outMax - outMin) / (outSteps - 1))
+        : String((outMax - outMin) / 1000);
 
-    const initialOut = Number.isFinite(pOutGain.value) ? pOutGain.value : (outMin + outMax) * 0.6;
+    const initialOut = Number.isFinite(pOutGain.value)
+      ? pOutGain.value
+      : (outMin + outMax) * 0.6;
+
     ui.vol.value = String(initialOut);
     ui.volVal.innerText = String(Math.round(initialOut * 1000) / 1000);
 
@@ -397,7 +414,22 @@
     });
 
     // ----------------------------
-    // Load manifest + apply saved order
+    // Progress/time helpers
+    // ----------------------------
+    function setProgress(frac01) {
+      const f = clamp01(frac01);
+      ui.progressFill.style.width = `${f * 100}%`;
+      ui.progressHandle.style.left = `${f * 100}%`;
+    }
+
+    function setTime(elapsedMs, totalMs) {
+      ui.timeElapsed.innerText = msToTime(elapsedMs);
+      const remaining = Math.max(0, totalMs - elapsedMs);
+      ui.timeRemaining.innerText = `-${msToTime(remaining)}`;
+    }
+
+    // ----------------------------
+    // Load manifest + order
     // ----------------------------
     const manifest = await fetchJSON(MANIFEST_URL);
     const filenames = manifest.items || [];
@@ -411,7 +443,7 @@
       ordered = kept.concat(missing);
     }
 
-    // Decode audio + peaks (update preload % in header)
+    // Decode + peaks (with preload %)
     const items = [];
     for (let i = 0; i < ordered.length; i++) {
       const name = ordered[i];
@@ -429,20 +461,11 @@
 
     ui.preloadText.innerText = `Preload complete: ${ordered.length} files`;
 
-    // ----------------------------
-    // Header progress + time helpers
-    // ----------------------------
-    function setProgress(frac01) {
-      const f = clamp01(frac01);
-      ui.progressFill.style.width = `${f * 100}%`;
-      ui.progressHandle.style.left = `${f * 100}%`;
-    }
-
-    function setTime(elapsedMs, totalMs) {
-      ui.timeElapsed.innerText = msToTime(elapsedMs);
-      const remaining = Math.max(0, totalMs - elapsedMs);
-      ui.timeRemaining.innerText = `-${msToTime(remaining)}`;
-    }
+    // Fade it away after a beat
+    ui.preloadText.style.setProperty("--fade-ms", `${PRELOAD_FADE_DURATION_MS}ms`);
+    setTimeout(() => {
+      ui.preloadText.classList.add("is-fading");
+    }, PRELOAD_FADE_DELAY_MS);
 
     // ----------------------------
     // State
@@ -450,18 +473,19 @@
     let selectedIdx = 0;
     let isLoop = false;
 
-    // playhead time from RNBO (ms)
-    let playheadMs = 0;
+    // “playing” is only used for UI logic / fallback; audio is driven by RNBO.
+    let isPlayingUI = false;
 
-    // Fallback playhead estimation if RNBO port isn’t firing
-    let isPlaying = false;
-    let playStartCtxTime = 0;
-    let playStartMs = 0;
+    // Raw playhead from RNBO (ms), may keep counting forever depending on patch.
+    let playheadMsRaw = 0;
+
+    // Display playhead after loop/end normalization.
+    let playheadMsDisplay = 0;
 
     let lastPaint = 0;
 
     // ----------------------------
-    // Playlist rows
+    // Rows
     // ----------------------------
     const rowEls = [];
 
@@ -479,7 +503,10 @@
         if (!canvas) return;
         const it = items[idx];
         const active = idx === selectedIdx;
-        const frac = active && it.durationMs > 0 ? clamp01(playheadMs / it.durationMs) : null;
+        const frac =
+          active && it.durationMs > 0
+            ? clamp01(playheadMsDisplay / it.durationMs)
+            : null;
         drawWaveform(canvas, it.peaks, frac);
       });
     }
@@ -487,6 +514,7 @@
     async function loadSelectedIntoRNBO() {
       const it = items[selectedIdx];
       if (!it) return;
+
       try {
         await primeAudio();
         await device.setDataBuffer("sample", it.audioBuffer);
@@ -502,11 +530,16 @@
       applyRowActiveClasses();
       loadSelectedIntoRNBO();
 
-      // reset header progress display on selection change
-      playheadMs = 0;
+      // Reset UI playhead on selection change
+      playheadMsRaw = 0;
+      playheadMsDisplay = 0;
+      isPlayingUI = false;
+
       setProgress(0);
       setTime(0, items[selectedIdx]?.durationMs || 0);
       redrawWaveforms();
+      ui.btnPlay.classList.remove("is-on");
+      ui.statusText.innerText = "Ready";
     }
 
     function renderList() {
@@ -556,6 +589,7 @@
           dragArmed = true;
           handle.setPointerCapture?.(ev.pointerId);
         });
+
         handle.addEventListener("pointerup", (ev) => {
           dragArmed = false;
           handle.releasePointerCapture?.(ev.pointerId);
@@ -610,6 +644,58 @@
     }
 
     // ----------------------------
+    // Loop / end normalization for UI
+    // ----------------------------
+    function normalizePlayheadForUI(rawMs, totalMs) {
+      if (!Number.isFinite(rawMs) || !Number.isFinite(totalMs) || totalMs <= 0) {
+        return { displayMs: 0, finished: false };
+      }
+
+      if (isLoop) {
+        // Wrap: rawMs can run forever; display should cycle.
+        // Keep it strictly within [0, totalMs).
+        const mod = rawMs % totalMs;
+        const d = mod < 0 ? mod + totalMs : mod;
+        return { displayMs: d, finished: false };
+      }
+
+      // Not looping: clamp to end and mark finished when crossing the end.
+      if (rawMs >= totalMs - END_EPS_MS) {
+        return { displayMs: totalMs, finished: true };
+      }
+
+      return { displayMs: rawMs, finished: false };
+    }
+
+    function paintUIFromPlayhead() {
+      const it = items[selectedIdx];
+      if (!it) return;
+
+      const norm = normalizePlayheadForUI(playheadMsRaw, it.durationMs);
+      playheadMsDisplay = norm.displayMs;
+
+      const frac = it.durationMs > 0 ? clamp01(playheadMsDisplay / it.durationMs) : 0;
+      setProgress(frac);
+
+      // If finished and not looping, freeze time at end and flip UI state
+      if (norm.finished) {
+        setTime(it.durationMs, it.durationMs);
+        redrawWaveforms();
+
+        if (isPlayingUI) {
+          isPlayingUI = false;
+          ui.btnPlay.classList.remove("is-on");
+          ui.statusText.innerText = "Finished";
+        }
+        return;
+      }
+
+      // Normal playing / looping
+      setTime(playheadMsDisplay, it.durationMs);
+      redrawWaveforms();
+    }
+
+    // ----------------------------
     // Transport actions
     // ----------------------------
     async function doPlay() {
@@ -618,10 +704,7 @@
 
       ui.statusText.innerText = "Playing";
       ui.btnPlay.classList.add("is-on");
-      isPlaying = true;
-
-      playStartCtxTime = context.currentTime;
-      playStartMs = playheadMs;
+      isPlayingUI = true;
 
       pulseParam(pPlayTrig);
     }
@@ -631,11 +714,13 @@
 
       ui.statusText.innerText = "Stopped";
       ui.btnPlay.classList.remove("is-on");
-      isPlaying = false;
+      isPlayingUI = false;
 
       pulseParam(pStopTrig);
 
-      playheadMs = 0;
+      playheadMsRaw = 0;
+      playheadMsDisplay = 0;
+
       setProgress(0);
       setTime(0, items[selectedIdx]?.durationMs || 0);
       redrawWaveforms();
@@ -654,8 +739,13 @@
     ui.btnLoop.addEventListener("click", (ev) => {
       ev.preventDefault();
       isLoop = !isLoop;
-      try { pLoop.value = isLoop ? 1 : 0; } catch (_) {}
+      try {
+        pLoop.value = isLoop ? 1 : 0;
+      } catch (_) {}
       ui.btnLoop.classList.toggle("is-on", isLoop);
+
+      // When loop toggles, immediately re-normalize UI from current raw time
+      paintUIFromPlayhead();
     });
 
     // Keyboard shortcuts
@@ -681,59 +771,23 @@
     });
 
     // ----------------------------
-    // Playhead: RNBO outport + fallback estimator
-    // ----------------------------
-    function paintFromPlayhead(now) {
-      const it = items[selectedIdx];
-      if (!it) return;
-
-      const frac = it.durationMs > 0 ? clamp01(playheadMs / it.durationMs) : 0;
-      setProgress(frac);
-      setTime(playheadMs, it.durationMs);
-      redrawWaveforms();
-    }
-
     // RNBO playhead messages
+    // ----------------------------
     if (device.messageEvent?.subscribe) {
       device.messageEvent.subscribe((ev) => {
         if (ev.tag !== "playhead") return;
         const payload = ev.payload || [];
         if (!payload.length) return;
 
-        playheadMs = Number(payload[0]) || 0;
+        playheadMsRaw = Number(payload[0]) || 0;
 
         const now = performance.now();
         if (now - lastPaint < PLAYHEAD_THROTTLE_MS) return;
         lastPaint = now;
 
-        paintFromPlayhead(now);
+        paintUIFromPlayhead();
       });
     }
-
-    // Fallback: if playing and no playhead updates, estimate
-    function tickFallback() {
-      if (!isPlaying) {
-        requestAnimationFrame(tickFallback);
-        return;
-      }
-
-      const it = items[selectedIdx];
-      if (it) {
-        // Estimate elapsed in ms from AudioContext time
-        const elapsed = (context.currentTime - playStartCtxTime) * 1000;
-        const estimated = playStartMs + elapsed;
-
-        // Only drive UI if RNBO isn’t actively updating (i.e., lastPaint stale)
-        const now = performance.now();
-        if (now - lastPaint > 120) {
-          playheadMs = estimated;
-          paintFromPlayhead(now);
-        }
-      }
-
-      requestAnimationFrame(tickFallback);
-    }
-    requestAnimationFrame(tickFallback);
 
     // ----------------------------
     // Initial render
@@ -741,6 +795,13 @@
     renderList();
     setSelected(0);
     loadSelectedIntoRNBO();
+
+    // Ensure initial UI is consistent
+    const it0 = items[0];
+    if (it0) {
+      setTime(0, it0.durationMs);
+      setProgress(0);
+    }
   }
 
   window.initPlaylistUI = initPlaylistUI;

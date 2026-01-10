@@ -1,6 +1,6 @@
 /* ==========================================================
    RNBO Playlist UI – Tokenized Dark Skin (Penpot → CSS)
-   Updated: adds Preload %, Rate slider styling, and keeps progress handle driven by JS
+   Updated: preload fade-away + rate slider styling + progress UI
    ========================================================== */
 
 :root {
@@ -153,11 +153,25 @@ body {
   line-height: 1.48;
 }
 
+/* Preload line + fade */
 #playlist-ui .rnbo-preload {
   color: var(--ui-text-faint);
   font-size: 12px;
   line-height: 1.2;
   margin-top: 4px;
+
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--fade-ms, 600ms) ease,
+    transform var(--fade-ms, 600ms) ease;
+  will-change: opacity, transform;
+}
+
+#playlist-ui .rnbo-preload.is-fading {
+  opacity: 0;
+  transform: translateY(-2px);
+  pointer-events: none;
 }
 
 #playlist-ui .status-badge {
