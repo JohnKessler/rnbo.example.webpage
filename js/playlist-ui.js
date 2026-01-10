@@ -1,31 +1,12 @@
 // playlist-ui.js
-// RNBO Playlist UI (Web Export) — Penpot-aligned, full-feature build
+// RNBO Playlist UI (Web Export) — Full UI + audio-safe priming + token-friendly states
 //
-// Requires RNBO parameters (by id):
+// Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
-// Requires RNBO external buffer name:
+// Expected RNBO external buffer name:
 //   "sample"
-// Requires port message tag (outport) for playhead:
+// Expected port message tag (outport) for playhead:
 //   "playhead" with ms as payload[0]
-//
-// DOM contract (matches playlist.css):
-//   #playlist-ui
-//     .rnbo-top
-//       .header-row-title
-//       .header-row-transport
-//       .header-row-progress
-//     .rnbo-scroll
-//       .rnbo-list
-//         .rnbo-row (draggable)
-//           .rnbo-row-header
-//             .rnbo-left-stack
-//               .rnbo-index
-//               .rnbo-handle
-//             .rnbo-item-info
-//               .rnbo-item-title
-//               .rnbo-item-meta
-//           .rnbo-waveform
-//             canvas.rnbo-canvas
 
 (function () {
   "use strict";
@@ -37,14 +18,11 @@
   const MANIFEST_URL = MEDIA_BASE + "playlist.json";
   const ORDER_KEY = "rnbo_playlist_order_v3";
 
-  // Waveform
+  // Waveform resolution (canvas internal)
   const WAVE_W = 520;
   const WAVE_H = 80;
 
-  // UI
-  const DEFAULT_OUTGAIN = 112; // maps to your rnbo outGain param scale (0..158 in your older UI)
-
-  // Throttle playhead UI updates
+  // UI playhead redraw throttle
   const PLAYHEAD_THROTTLE_MS = 16;
 
   // ----------------------------
@@ -76,6 +54,8 @@
   }
 
   function pulseParam(param, ms = 20) {
+    // RNBO trigger params are commonly edge-triggered.
+    // Pulse to 1 then back to 0 quickly.
     param.value = 1;
     setTimeout(() => {
       param.value = 0;
@@ -118,13 +98,11 @@
   function createEl(tag, props = {}, children = []) {
     const el = document.createElement(tag);
 
-    // dataset support
     if (props.dataset) {
       Object.entries(props.dataset).forEach(([k, v]) => (el.dataset[k] = v));
       delete props.dataset;
     }
 
-    // ariaLabel convenience
     if (props.ariaLabel) {
       el.setAttribute("aria-label", props.ariaLabel);
       delete props.ariaLabel;
@@ -135,7 +113,7 @@
     return el;
   }
 
-  // Minimal inline SVG icons (so no dependency on fonts)
+  // Minimal inline SVG icons (no external assets)
   function iconSVG(pathD) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -152,7 +130,8 @@
 
   const ICON_PLAY = "M8 5v14l11-7z";
   const ICON_STOP = "M7 7h10v10H7z";
-  const ICON_LOOP = "M17 1l4 4-4 4V6H7a4 4 0 000 8h1v2H7a6 6 0 010-12h10V1zm-6 14v3l-4-4 4-4v3h6a4 4 0 000-8h-1V3h1a6 6 0 010 12h-6z";
+  const ICON_LOOP =
+    "M17 1l4 4-4 4V6H7a4 4 0 000 8h1v2H7a6 6 0 010-12h10V1zm-6 14v3l-4-4 4-4v3h6a4 4 0 000-8h-1V3h1a6 6 0 010 12h-6z";
 
   // ----------------------------
   // Waveform
@@ -186,7 +165,6 @@
 
     ctx.clearRect(0, 0, w, h);
 
-    // waveform lines (single stroke; color from CSS currentColor if desired)
     ctx.beginPath();
     for (let x = 0; x < w; x++) {
       const min = peaks[x * 2];
@@ -221,7 +199,7 @@
     const top = createEl("div", { className: "rnbo-top" });
     const scroll = createEl("div", { className: "rnbo-scroll" });
 
-    // --- Row: Title/Status
+    // Title/status row
     const headerRowTitle = createEl("div", { className: "header-row-title" });
     const titleStack = createEl("div", { className: "title-stack" }, [
       createEl("div", { className: "rnbo-title", innerText: "Playlist" }),
@@ -232,7 +210,7 @@
     ]);
     headerRowTitle.append(titleStack, statusBadge);
 
-    // --- Row: Transport + Volume
+    // Transport row
     const headerRowTransport = createEl("div", { className: "header-row-transport" });
 
     const btnPlay = createEl(
@@ -240,13 +218,11 @@
       { className: "rnbo-btn rnbo-iconbtn rnbo-play", type: "button", title: "Play", ariaLabel: "Play" },
       [iconSVG(ICON_PLAY)]
     );
-
     const btnStop = createEl(
       "button",
       { className: "rnbo-btn rnbo-iconbtn rnbo-stop", type: "button", title: "Stop", ariaLabel: "Stop" },
       [iconSVG(ICON_STOP)]
     );
-
     const btnLoop = createEl(
       "button",
       { className: "rnbo-btn rnbo-iconbtn rnbo-loop", type: "button", title: "Loop", ariaLabel: "Loop" },
@@ -259,13 +235,13 @@
       className: "rnbo-slider rnbo-volume-slider",
       type: "range",
       min: 0,
-      max: 158,
-      step: 1,
-      value: DEFAULT_OUTGAIN,
+      max: 1,
+      step: 0.01,
+      value: 1,
       ariaLabel: "Volume",
     });
 
-    const volVal = createEl("span", { className: "rnbo-readout rnbo-volreadout", innerText: String(DEFAULT_OUTGAIN) });
+    const volVal = createEl("span", { className: "rnbo-readout rnbo-volreadout", innerText: "—" });
 
     const volumeGroup = createEl("div", { className: "volume-group" }, [
       createEl("span", { className: "rnbo-meta rnbo-voltag", innerText: "VOL" }),
@@ -275,7 +251,7 @@
 
     headerRowTransport.append(transportLeft, createEl("div", { className: "transport-spacer" }), volumeGroup);
 
-    // --- Row: Progress + Time
+    // Progress row
     const headerRowProgress = createEl("div", { className: "header-row-progress" });
 
     const progressTrack = createEl("div", { className: "progress-track" }, [
@@ -309,7 +285,6 @@
       btnLoop,
       vol,
       volVal,
-      statusBadge,
       statusText: statusBadge.querySelector(".status-text"),
       progressTrack,
       progressFill: progressTrack.querySelector(".progress-fill"),
@@ -320,7 +295,7 @@
   }
 
   // ----------------------------
-  // Main init (called by app.js)
+  // Init (called by app.js)
   // ----------------------------
   async function initPlaylistUI(device, context) {
     const ui = buildUI();
@@ -333,16 +308,86 @@
     const pStopTrig = ensureParam(device, "stopTrig");
     const pOutGain = ensureParam(device, "outGain");
 
-    // Init params
-    try {
-      pOutGain.value = DEFAULT_OUTGAIN;
-    } catch (_) {}
+    // ----------------------------
+    // Audio priming (fixes “UI works but silence”)
+    // ----------------------------
+    let primed = false;
 
-    // Load manifest
+    async function primeAudio(reason) {
+      try {
+        // 1) Resume context if needed
+        if (context && context.state !== "running") {
+          await context.resume();
+        }
+
+        // 2) Ensure device is connected
+        // app.js already connects device.node -> outputNode -> destination.
+        // But we defensively ensure the node is connected somewhere audible.
+        // DO NOT spam-connect repeatedly.
+        if (!primed) {
+          try {
+            // If app.js wiring exists, this is already connected; this extra connect is safe in practice
+            // and fixes cases where the graph got disconnected during hot reload.
+            if (device?.node && context?.destination) {
+              device.node.connect(context.destination);
+            }
+          } catch (_) {}
+        }
+
+        primed = true;
+        ui.statusText.innerText = "Ready";
+      } catch (err) {
+        console.error("primeAudio failed:", err);
+        ui.statusText.innerText = "Audio blocked";
+      }
+    }
+
+    // Prime on meaningful gestures
+    const primeOn = (el) => {
+      el.addEventListener("pointerdown", () => primeAudio("pointerdown"), { passive: true });
+      el.addEventListener("click", () => primeAudio("click"), { passive: true });
+    };
+    [ui.btnPlay, ui.btnStop, ui.btnLoop, ui.vol].forEach(primeOn);
+
+    // ----------------------------
+    // Make VOL slider match RNBO outGain param range
+    // ----------------------------
+    const outMin = Number.isFinite(pOutGain.min) ? pOutGain.min : 0;
+    const outMax = Number.isFinite(pOutGain.max) ? pOutGain.max : 1;
+    const outSteps = Number.isFinite(pOutGain.steps) ? pOutGain.steps : 0;
+
+    ui.vol.min = String(outMin);
+    ui.vol.max = String(outMax);
+
+    if (outSteps && outSteps > 1) {
+      ui.vol.step = String((outMax - outMin) / (outSteps - 1));
+    } else {
+      ui.vol.step = String((outMax - outMin) / 1000);
+    }
+
+    // Initialize volume to current param value (or midrange)
+    const initialOut = Number.isFinite(pOutGain.value) ? pOutGain.value : (outMin + outMax) * 0.6;
+    ui.vol.value = String(initialOut);
+    ui.volVal.innerText = String(Math.round(initialOut * 1000) / 1000);
+
+    function setOutGain(v) {
+      try {
+        pOutGain.value = v;
+      } catch (_) {}
+      ui.volVal.innerText = String(Math.round(v * 1000) / 1000);
+    }
+
+    ui.vol.addEventListener("input", () => {
+      const v = Number(ui.vol.value);
+      setOutGain(v);
+    });
+
+    // ----------------------------
+    // Load manifest + apply saved order
+    // ----------------------------
     const manifest = await fetchJSON(MANIFEST_URL);
     const filenames = manifest.items || [];
 
-    // Apply saved order (by filename)
     const saved = loadOrder();
     let ordered = filenames.slice();
     if (Array.isArray(saved) && saved.length) {
@@ -359,65 +404,53 @@
       const ab = await fetchArrayBuffer(MEDIA_BASE + name);
       const audioBuffer = await context.decodeAudioData(ab);
       const peaks = buildPeaks(audioBuffer, WAVE_W);
+      const durationMs = (audioBuffer.length / audioBuffer.sampleRate) * 1000;
 
-      items.push({
-        name,
-        audioBuffer,
-        peaks,
-        durationMs: (audioBuffer.length / audioBuffer.sampleRate) * 1000,
-      });
+      items.push({ name, audioBuffer, peaks, durationMs });
     }
 
+    // ----------------------------
     // State
+    // ----------------------------
     let selectedIdx = 0;
     let isLoop = false;
+    let isPlaying = false;
+
     let playheadMs = 0;
     let lastPlayheadPaint = 0;
 
-    // --- UI wiring
-    ui.btnPlay.onclick = () => {
-      // Many browsers require user gesture; this is a gesture.
-      pulseParam(pPlayTrig);
-      ui.statusText.innerText = "Playing";
-      ui.btnPlay.classList.add("is-on");
-    };
+    // ----------------------------
+    // RNBO buffer loading
+    // ----------------------------
+    async function loadSelectedIntoRNBO() {
+      const it = items[selectedIdx];
+      if (!it) return;
 
-    ui.btnStop.onclick = () => {
-      pulseParam(pStopTrig);
-      ui.statusText.innerText = "Stopped";
-      ui.btnPlay.classList.remove("is-on");
-      // Reset progress visuals
-      setProgress(0);
-    };
-
-    ui.btnLoop.onclick = () => {
-      isLoop = !isLoop;
       try {
-        pLoop.value = isLoop ? 1 : 0;
-      } catch (_) {}
-      ui.btnLoop.classList.toggle("is-on", isLoop);
-    };
+        // Important: prime first on some platforms, otherwise the audio graph can be inert.
+        await primeAudio("loadSelected");
 
-    ui.vol.oninput = () => {
-      const v = Number(ui.vol.value);
-      ui.volVal.innerText = String(v);
-      try {
-        pOutGain.value = v;
-      } catch (_) {}
-    };
+        // This must match your RNBO buffer name.
+        await device.setDataBuffer("sample", it.audioBuffer);
 
-    // Rate (optional: if you later add a slider, this is ready)
-    function setRate(v) {
-      try {
-        pRate.value = v;
-      } catch (_) {}
+        // Keep RNBO index param aligned
+        try {
+          pClipIndex.value = selectedIdx;
+        } catch (_) {}
+
+        ui.statusText.innerText = "Ready";
+      } catch (err) {
+        console.error("Failed to load buffer into RNBO:", err);
+        ui.statusText.innerText = "Buffer load failed";
+      }
     }
 
-    // Progress helpers
+    // ----------------------------
+    // Progress UI helpers
+    // ----------------------------
     function setProgress(frac01) {
       const f = clamp01(frac01);
       ui.progressFill.style.width = `${f * 100}%`;
-      // handle position (visual only)
       ui.progressHandle.style.left = `${f * 100}%`;
     }
 
@@ -427,35 +460,35 @@
       ui.timeRemaining.innerText = `-${msToTime(remaining)}`;
     }
 
-    // Seek by clicking progress track
-    ui.progressTrack.addEventListener("pointerdown", (e) => {
-      const rect = ui.progressTrack.getBoundingClientRect();
-      const x = Math.min(Math.max(0, e.clientX - rect.left), rect.width);
-      const frac = rect.width > 0 ? x / rect.width : 0;
+    // ----------------------------
+    // Playlist rendering + drag reorder
+    // ----------------------------
+    const rowEls = [];
 
-      // For now: only update UI (actual seeking requires RNBO support)
-      setProgress(frac);
-    });
-
-    // --- Render list
-    const rowEls = []; // store refs for fast class updates
-
-    function setSelected(newIdx) {
-      selectedIdx = Math.max(0, Math.min(items.length - 1, newIdx));
-      try {
-        pClipIndex.value = selectedIdx;
-      } catch (_) {}
-
-      // Update row classes
+    function applyRowActiveClasses() {
       rowEls.forEach((r, idx) => {
         const on = idx === selectedIdx;
         r.classList.toggle("selected", on);
         r.classList.toggle("is-active", on);
       });
+    }
 
-      // Update status badge text (optional)
-      ui.statusText.innerText = "Ready";
-      ui.btnPlay.classList.remove("is-on");
+    function redrawWaveforms() {
+      rowEls.forEach((row, idx) => {
+        const canvas = row.querySelector("canvas.rnbo-canvas");
+        if (!canvas) return;
+        const it = items[idx];
+        const active = idx === selectedIdx;
+        const frac = active && it.durationMs > 0 ? clamp01(playheadMs / it.durationMs) : null;
+        drawWaveform(canvas, it.peaks, frac);
+      });
+    }
+
+    function setSelected(idx) {
+      selectedIdx = Math.max(0, Math.min(items.length - 1, idx));
+      applyRowActiveClasses();
+      redrawWaveforms();
+      loadSelectedIntoRNBO();
     }
 
     function renderList() {
@@ -465,21 +498,16 @@
       items.forEach((it, idx) => {
         const indexBadge = createEl("div", { className: "rnbo-index", innerText: pad2(idx + 1) });
 
-        const handle = createEl("button", {
-          className: "rnbo-handle",
-          type: "button",
-          ariaLabel: "Reorder",
-          title: "Drag to reorder",
-        }, [createEl("span", { innerText: "≡≡" })]);
+        const handle = createEl(
+          "button",
+          { className: "rnbo-handle", type: "button", ariaLabel: "Reorder", title: "Drag to reorder" },
+          [createEl("span", { innerText: "≡≡" })]
+        );
 
         const leftStack = createEl("div", { className: "rnbo-left-stack" }, [indexBadge, handle]);
 
         const title = createEl("div", { className: "rnbo-item-title", innerText: it.name });
-        const meta = createEl("div", {
-          className: "rnbo-item-meta",
-          innerText: `${msToTime(it.durationMs)} • ${Math.round(it.audioBuffer.sampleRate / 100) / 10}kHz`,
-        });
-
+        const meta = createEl("div", { className: "rnbo-item-meta", innerText: `${msToTime(it.durationMs)} • ${Math.round(it.audioBuffer.sampleRate / 100) / 10}kHz` });
         const info = createEl("div", { className: "rnbo-item-info" }, [title, meta]);
 
         const header = createEl("div", { className: "rnbo-row-header" }, [leftStack, info]);
@@ -496,21 +524,19 @@
           dataset: { idx: String(idx) },
         }, [header, waveformWrap]);
 
-        // Draw initial waveform (no playhead except active)
         drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null);
 
-        // Selection
-        row.addEventListener("click", (ev) => {
-          // Don’t treat clicking the handle as selection-only; still select, but don’t start accidental drag
+        // Prime + select on click (selection is a user gesture — good moment to prime)
+        row.addEventListener("click", async () => {
+          await primeAudio("rowClick");
           setSelected(idx);
-          // Redraw playheads: active shows playhead at current
-          redrawWaveforms();
         });
 
-        // Drag reorder (handle-controlled)
+        // Drag reorder (arm drag only from handle)
         let dragArmed = false;
 
-        handle.addEventListener("pointerdown", (ev) => {
+        handle.addEventListener("pointerdown", async (ev) => {
+          await primeAudio("handlePointerDown");
           dragArmed = true;
           handle.setPointerCapture?.(ev.pointerId);
         });
@@ -520,7 +546,6 @@
           handle.releasePointerCapture?.(ev.pointerId);
         });
 
-        // HTML5 drag events
         row.addEventListener("dragstart", (ev) => {
           if (!dragArmed) {
             ev.preventDefault();
@@ -547,46 +572,78 @@
           const to = idx;
           if (!Number.isFinite(from) || from === to) return;
 
-          // Reorder items array
+          const selectedName = items[selectedIdx]?.name;
+
           const moved = items.splice(from, 1)[0];
           items.splice(to, 0, moved);
 
-          // Persist order by filename
           saveOrder(items.map((x) => x.name));
 
-          // Update selected index to follow item identity
-          const selectedName = moved.name; // not perfect if moving different row; fix below
-          const curName = items[selectedIdx]?.name;
-
-          // Recompute selectedIdx by matching previous selection name
-          if (curName) {
-            const newSel = items.findIndex((x) => x.name === curName);
-            selectedIdx = newSel >= 0 ? newSel : 0;
-          } else {
-            selectedIdx = 0;
-          }
+          // restore selection by identity
+          const newSel = items.findIndex((x) => x.name === selectedName);
+          selectedIdx = newSel >= 0 ? newSel : 0;
 
           renderList();
+          applyRowActiveClasses();
           redrawWaveforms();
+          loadSelectedIntoRNBO();
         });
 
         ui.list.appendChild(row);
         rowEls.push(row);
       });
+
+      applyRowActiveClasses();
     }
 
-    function redrawWaveforms() {
-      const rows = ui.list.querySelectorAll(".rnbo-row");
-      rows.forEach((row, idx) => {
-        const canvas = row.querySelector("canvas.rnbo-canvas");
-        if (!canvas) return;
-        const it = items[idx];
-        const isActive = idx === selectedIdx;
-        const dur = it.durationMs || 1;
-        const ph = isActive ? clamp01(playheadMs / dur) : null;
-        drawWaveform(canvas, it.peaks, ph);
-      });
+    // ----------------------------
+    // Transport actions
+    // ----------------------------
+    async function doPlay() {
+      await primeAudio("play");
+      await loadSelectedIntoRNBO();
+
+      isPlaying = true;
+      ui.statusText.innerText = "Playing";
+      ui.btnPlay.classList.add("is-on");
+
+      pulseParam(pPlayTrig);
     }
+
+    async function doStop() {
+      await primeAudio("stop");
+      isPlaying = false;
+      ui.statusText.innerText = "Stopped";
+      ui.btnPlay.classList.remove("is-on");
+      pulseParam(pStopTrig);
+
+      playheadMs = 0;
+      setProgress(0);
+      setTime(0, items[selectedIdx]?.durationMs || 0);
+      redrawWaveforms();
+    }
+
+    ui.btnPlay.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      doPlay();
+    });
+
+    ui.btnStop.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      doStop();
+    });
+
+    ui.btnLoop.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      await primeAudio("loop");
+
+      isLoop = !isLoop;
+      try {
+        pLoop.value = isLoop ? 1 : 0;
+      } catch (_) {}
+
+      ui.btnLoop.classList.toggle("is-on", isLoop);
+    });
 
     // Keyboard shortcuts
     window.addEventListener("keydown", (ev) => {
@@ -595,60 +652,53 @@
       if (ev.key === "ArrowDown") {
         ev.preventDefault();
         setSelected(selectedIdx + 1);
-        redrawWaveforms();
       } else if (ev.key === "ArrowUp") {
         ev.preventDefault();
         setSelected(selectedIdx - 1);
-        redrawWaveforms();
       } else if (ev.key === " " || ev.code === "Space") {
         ev.preventDefault();
-        pulseParam(pPlayTrig);
-        ui.statusText.innerText = "Playing";
-        ui.btnPlay.classList.add("is-on");
+        doPlay();
       } else if (ev.key.toLowerCase() === "s") {
         ev.preventDefault();
-        pulseParam(pStopTrig);
-        ui.statusText.innerText = "Stopped";
-        ui.btnPlay.classList.remove("is-on");
-        setProgress(0);
+        doStop();
       } else if (ev.key.toLowerCase() === "l") {
         ev.preventDefault();
         ui.btnLoop.click();
       }
     });
 
-    // Playhead port listener (RNBO outport message)
-    const port = device.messageEvent ? device : device.node; // safety for different exports
+    // Playhead updates (RNBO outport message)
     if (device.messageEvent?.subscribe) {
       device.messageEvent.subscribe((ev) => {
         const tag = ev.tag;
         const payload = ev.payload || [];
-        if (tag === "playhead" && payload.length) {
-          playheadMs = Number(payload[0]) || 0;
+        if (tag !== "playhead" || !payload.length) return;
 
-          const now = performance.now();
-          if (now - lastPlayheadPaint >= PLAYHEAD_THROTTLE_MS) {
-            lastPlayheadPaint = now;
+        playheadMs = Number(payload[0]) || 0;
 
-            const it = items[selectedIdx];
-            if (it) {
-              const dur = it.durationMs || 1;
-              const frac = clamp01(playheadMs / dur);
-              setProgress(frac);
-              setTime(playheadMs, dur);
-              redrawWaveforms();
-            }
-          }
-        }
+        const now = performance.now();
+        if (now - lastPlayheadPaint < PLAYHEAD_THROTTLE_MS) return;
+        lastPlayheadPaint = now;
+
+        const it = items[selectedIdx];
+        if (!it) return;
+
+        const frac = it.durationMs > 0 ? clamp01(playheadMs / it.durationMs) : 0;
+        setProgress(frac);
+        setTime(playheadMs, it.durationMs);
+        redrawWaveforms();
       });
     }
 
-    // Initial render
+    // ----------------------------
+    // Initial draw
+    // ----------------------------
     renderList();
     setSelected(0);
-    redrawWaveforms();
+
+    // Don’t auto-play (autoplay policies). But do preload buffer into RNBO ASAP.
+    loadSelectedIntoRNBO();
   }
 
-  // Expose for app.js
   window.initPlaylistUI = initPlaylistUI;
 })();
