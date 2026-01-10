@@ -1,5 +1,5 @@
 // playlist-ui.js
-// RNBO Playlist UI (Web Export) — Full UI + audio-safe priming + token-friendly states
+// RNBO Playlist UI — full header UI + working progress + rate slider + preload %
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
@@ -16,13 +16,11 @@
   // ----------------------------
   const MEDIA_BASE = "export/media/";
   const MANIFEST_URL = MEDIA_BASE + "playlist.json";
-  const ORDER_KEY = "rnbo_playlist_order_v3";
+  const ORDER_KEY = "rnbo_playlist_order_v4";
 
-  // Waveform resolution (canvas internal)
   const WAVE_W = 520;
   const WAVE_H = 80;
 
-  // UI playhead redraw throttle
   const PLAYHEAD_THROTTLE_MS = 16;
 
   // ----------------------------
@@ -54,12 +52,8 @@
   }
 
   function pulseParam(param, ms = 20) {
-    // RNBO trigger params are commonly edge-triggered.
-    // Pulse to 1 then back to 0 quickly.
     param.value = 1;
-    setTimeout(() => {
-      param.value = 0;
-    }, ms);
+    setTimeout(() => { param.value = 0; }, ms);
   }
 
   async function fetchJSON(url) {
@@ -75,9 +69,7 @@
   }
 
   function saveOrder(names) {
-    try {
-      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
-    } catch (_) {}
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
   }
 
   function loadOrder() {
@@ -113,7 +105,7 @@
     return el;
   }
 
-  // Minimal inline SVG icons (no external assets)
+  // Minimal inline SVG icons
   function iconSVG(pathD) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -143,8 +135,7 @@
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1,
-        max = -1;
+      let min = 1, max = -1;
       const start = x * spp;
       const end = Math.min(len, (x + 1) * spp);
       for (let i = start; i < end; i++) {
@@ -199,18 +190,22 @@
     const top = createEl("div", { className: "rnbo-top" });
     const scroll = createEl("div", { className: "rnbo-scroll" });
 
-    // Title/status row
+    // Row: Title + status + preload %
     const headerRowTitle = createEl("div", { className: "header-row-title" });
+
     const titleStack = createEl("div", { className: "title-stack" }, [
       createEl("div", { className: "rnbo-title", innerText: "Playlist" }),
       createEl("div", { className: "rnbo-meta", innerText: "RNBO Web Export" }),
+      createEl("div", { className: "rnbo-preload", innerText: "Preload: 0%" }),
     ]);
+
     const statusBadge = createEl("div", { className: "status-badge" }, [
       createEl("span", { className: "status-text", innerText: "Ready" }),
     ]);
+
     headerRowTitle.append(titleStack, statusBadge);
 
-    // Transport row
+    // Row: Transport + loop + rate + volume
     const headerRowTransport = createEl("div", { className: "header-row-transport" });
 
     const btnPlay = createEl(
@@ -231,6 +226,25 @@
 
     const transportLeft = createEl("div", { className: "transport-left" }, [btnPlay, btnStop, btnLoop]);
 
+    // Rate group
+    const rate = createEl("input", {
+      className: "rnbo-slider rnbo-rate-slider",
+      type: "range",
+      min: 0.25,
+      max: 2,
+      step: 0.01,
+      value: 1,
+      ariaLabel: "Rate",
+    });
+    const rateVal = createEl("span", { className: "rnbo-readout rnbo-ratereadout", innerText: "1.00×" });
+
+    const rateGroup = createEl("div", { className: "rate-group" }, [
+      createEl("span", { className: "rnbo-meta rnbo-ratetag", innerText: "RATE" }),
+      rate,
+      rateVal,
+    ]);
+
+    // Volume group
     const vol = createEl("input", {
       className: "rnbo-slider rnbo-volume-slider",
       type: "range",
@@ -240,7 +254,6 @@
       value: 1,
       ariaLabel: "Volume",
     });
-
     const volVal = createEl("span", { className: "rnbo-readout rnbo-volreadout", innerText: "—" });
 
     const volumeGroup = createEl("div", { className: "volume-group" }, [
@@ -249,9 +262,14 @@
       volVal,
     ]);
 
-    headerRowTransport.append(transportLeft, createEl("div", { className: "transport-spacer" }), volumeGroup);
+    headerRowTransport.append(
+      transportLeft,
+      createEl("div", { className: "transport-spacer" }),
+      rateGroup,
+      volumeGroup
+    );
 
-    // Progress row
+    // Row: Progress + time (this is the one you want moving)
     const headerRowProgress = createEl("div", { className: "header-row-progress" });
 
     const progressTrack = createEl("div", { className: "progress-track" }, [
@@ -280,12 +298,20 @@
       top,
       scroll,
       list,
+
       btnPlay,
       btnStop,
       btnLoop,
+
+      rate,
+      rateVal,
+
       vol,
       volVal,
+
+      preloadText: titleStack.querySelector(".rnbo-preload"),
       statusText: statusBadge.querySelector(".status-text"),
+
       progressTrack,
       progressFill: progressTrack.querySelector(".progress-fill"),
       progressHandle: progressTrack.querySelector(".progress-handle"),
@@ -309,48 +335,46 @@
     const pOutGain = ensureParam(device, "outGain");
 
     // ----------------------------
-    // Audio priming (fixes “UI works but silence”)
+    // Prime audio on gesture
     // ----------------------------
-    let primed = false;
-
-    async function primeAudio(reason) {
+    async function primeAudio() {
       try {
-        // 1) Resume context if needed
-        if (context && context.state !== "running") {
-          await context.resume();
-        }
-
-        // 2) Ensure device is connected
-        // app.js already connects device.node -> outputNode -> destination.
-        // But we defensively ensure the node is connected somewhere audible.
-        // DO NOT spam-connect repeatedly.
-        if (!primed) {
-          try {
-            // If app.js wiring exists, this is already connected; this extra connect is safe in practice
-            // and fixes cases where the graph got disconnected during hot reload.
-            if (device?.node && context?.destination) {
-              device.node.connect(context.destination);
-            }
-          } catch (_) {}
-        }
-
-        primed = true;
-        ui.statusText.innerText = "Ready";
-      } catch (err) {
-        console.error("primeAudio failed:", err);
-        ui.statusText.innerText = "Audio blocked";
-      }
+        if (context && context.state !== "running") await context.resume();
+      } catch (_) {}
     }
-
-    // Prime on meaningful gestures
-    const primeOn = (el) => {
-      el.addEventListener("pointerdown", () => primeAudio("pointerdown"), { passive: true });
-      el.addEventListener("click", () => primeAudio("click"), { passive: true });
-    };
-    [ui.btnPlay, ui.btnStop, ui.btnLoop, ui.vol].forEach(primeOn);
+    ["pointerdown", "click"].forEach((evt) => {
+      ui.btnPlay.addEventListener(evt, primeAudio, { passive: true });
+      ui.btnStop.addEventListener(evt, primeAudio, { passive: true });
+      ui.btnLoop.addEventListener(evt, primeAudio, { passive: true });
+      ui.rate.addEventListener(evt, primeAudio, { passive: true });
+      ui.vol.addEventListener(evt, primeAudio, { passive: true });
+    });
 
     // ----------------------------
-    // Make VOL slider match RNBO outGain param range
+    // Bind RATE slider to RNBO param (auto range)
+    // ----------------------------
+    const rateMin = Number.isFinite(pRate.min) ? pRate.min : 0.25;
+    const rateMax = Number.isFinite(pRate.max) ? pRate.max : 2.0;
+    const rateSteps = Number.isFinite(pRate.steps) ? pRate.steps : 0;
+
+    ui.rate.min = String(rateMin);
+    ui.rate.max = String(rateMax);
+    ui.rate.step = rateSteps && rateSteps > 1
+      ? String((rateMax - rateMin) / (rateSteps - 1))
+      : String((rateMax - rateMin) / 1000);
+
+    // initialize from param
+    ui.rate.value = String(pRate.value);
+    ui.rateVal.innerText = `${Number(pRate.value).toFixed(2)}×`;
+
+    ui.rate.addEventListener("input", () => {
+      const v = Number(ui.rate.value);
+      pRate.value = v;
+      ui.rateVal.innerText = `${v.toFixed(2)}×`;
+    });
+
+    // ----------------------------
+    // Bind VOL slider to RNBO outGain param (auto range)
     // ----------------------------
     const outMin = Number.isFinite(pOutGain.min) ? pOutGain.min : 0;
     const outMax = Number.isFinite(pOutGain.max) ? pOutGain.max : 1;
@@ -358,28 +382,18 @@
 
     ui.vol.min = String(outMin);
     ui.vol.max = String(outMax);
+    ui.vol.step = outSteps && outSteps > 1
+      ? String((outMax - outMin) / (outSteps - 1))
+      : String((outMax - outMin) / 1000);
 
-    if (outSteps && outSteps > 1) {
-      ui.vol.step = String((outMax - outMin) / (outSteps - 1));
-    } else {
-      ui.vol.step = String((outMax - outMin) / 1000);
-    }
-
-    // Initialize volume to current param value (or midrange)
     const initialOut = Number.isFinite(pOutGain.value) ? pOutGain.value : (outMin + outMax) * 0.6;
     ui.vol.value = String(initialOut);
     ui.volVal.innerText = String(Math.round(initialOut * 1000) / 1000);
 
-    function setOutGain(v) {
-      try {
-        pOutGain.value = v;
-      } catch (_) {}
-      ui.volVal.innerText = String(Math.round(v * 1000) / 1000);
-    }
-
     ui.vol.addEventListener("input", () => {
       const v = Number(ui.vol.value);
-      setOutGain(v);
+      pOutGain.value = v;
+      ui.volVal.innerText = String(Math.round(v * 1000) / 1000);
     });
 
     // ----------------------------
@@ -397,56 +411,26 @@
       ordered = kept.concat(missing);
     }
 
-    // Decode audio + peaks
+    // Decode audio + peaks (update preload % in header)
     const items = [];
     for (let i = 0; i < ordered.length; i++) {
       const name = ordered[i];
+
       const ab = await fetchArrayBuffer(MEDIA_BASE + name);
       const audioBuffer = await context.decodeAudioData(ab);
       const peaks = buildPeaks(audioBuffer, WAVE_W);
       const durationMs = (audioBuffer.length / audioBuffer.sampleRate) * 1000;
 
       items.push({ name, audioBuffer, peaks, durationMs });
+
+      const frac = (i + 1) / Math.max(1, ordered.length);
+      ui.preloadText.innerText = `Preload: ${Math.round(frac * 100)}% (${i + 1}/${ordered.length})`;
     }
 
-    // ----------------------------
-    // State
-    // ----------------------------
-    let selectedIdx = 0;
-    let isLoop = false;
-    let isPlaying = false;
-
-    let playheadMs = 0;
-    let lastPlayheadPaint = 0;
+    ui.preloadText.innerText = `Preload complete: ${ordered.length} files`;
 
     // ----------------------------
-    // RNBO buffer loading
-    // ----------------------------
-    async function loadSelectedIntoRNBO() {
-      const it = items[selectedIdx];
-      if (!it) return;
-
-      try {
-        // Important: prime first on some platforms, otherwise the audio graph can be inert.
-        await primeAudio("loadSelected");
-
-        // This must match your RNBO buffer name.
-        await device.setDataBuffer("sample", it.audioBuffer);
-
-        // Keep RNBO index param aligned
-        try {
-          pClipIndex.value = selectedIdx;
-        } catch (_) {}
-
-        ui.statusText.innerText = "Ready";
-      } catch (err) {
-        console.error("Failed to load buffer into RNBO:", err);
-        ui.statusText.innerText = "Buffer load failed";
-      }
-    }
-
-    // ----------------------------
-    // Progress UI helpers
+    // Header progress + time helpers
     // ----------------------------
     function setProgress(frac01) {
       const f = clamp01(frac01);
@@ -461,7 +445,23 @@
     }
 
     // ----------------------------
-    // Playlist rendering + drag reorder
+    // State
+    // ----------------------------
+    let selectedIdx = 0;
+    let isLoop = false;
+
+    // playhead time from RNBO (ms)
+    let playheadMs = 0;
+
+    // Fallback playhead estimation if RNBO port isn’t firing
+    let isPlaying = false;
+    let playStartCtxTime = 0;
+    let playStartMs = 0;
+
+    let lastPaint = 0;
+
+    // ----------------------------
+    // Playlist rows
     // ----------------------------
     const rowEls = [];
 
@@ -484,11 +484,29 @@
       });
     }
 
+    async function loadSelectedIntoRNBO() {
+      const it = items[selectedIdx];
+      if (!it) return;
+      try {
+        await primeAudio();
+        await device.setDataBuffer("sample", it.audioBuffer);
+        pClipIndex.value = selectedIdx;
+      } catch (err) {
+        console.error("Failed to set RNBO buffer:", err);
+        ui.statusText.innerText = "Buffer load failed";
+      }
+    }
+
     function setSelected(idx) {
       selectedIdx = Math.max(0, Math.min(items.length - 1, idx));
       applyRowActiveClasses();
-      redrawWaveforms();
       loadSelectedIntoRNBO();
+
+      // reset header progress display on selection change
+      playheadMs = 0;
+      setProgress(0);
+      setTime(0, items[selectedIdx]?.durationMs || 0);
+      redrawWaveforms();
     }
 
     function renderList() {
@@ -507,9 +525,12 @@
         const leftStack = createEl("div", { className: "rnbo-left-stack" }, [indexBadge, handle]);
 
         const title = createEl("div", { className: "rnbo-item-title", innerText: it.name });
-        const meta = createEl("div", { className: "rnbo-item-meta", innerText: `${msToTime(it.durationMs)} • ${Math.round(it.audioBuffer.sampleRate / 100) / 10}kHz` });
-        const info = createEl("div", { className: "rnbo-item-info" }, [title, meta]);
+        const meta = createEl("div", {
+          className: "rnbo-item-meta",
+          innerText: `${msToTime(it.durationMs)} • ${Math.round(it.audioBuffer.sampleRate / 100) / 10}kHz`,
+        });
 
+        const info = createEl("div", { className: "rnbo-item-info" }, [title, meta]);
         const header = createEl("div", { className: "rnbo-row-header" }, [leftStack, info]);
 
         const canvas = createEl("canvas", { className: "rnbo-canvas" });
@@ -526,21 +547,15 @@
 
         drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null);
 
-        // Prime + select on click (selection is a user gesture — good moment to prime)
-        row.addEventListener("click", async () => {
-          await primeAudio("rowClick");
-          setSelected(idx);
-        });
+        row.addEventListener("click", () => setSelected(idx));
 
         // Drag reorder (arm drag only from handle)
         let dragArmed = false;
 
-        handle.addEventListener("pointerdown", async (ev) => {
-          await primeAudio("handlePointerDown");
+        handle.addEventListener("pointerdown", (ev) => {
           dragArmed = true;
           handle.setPointerCapture?.(ev.pointerId);
         });
-
         handle.addEventListener("pointerup", (ev) => {
           dragArmed = false;
           handle.releasePointerCapture?.(ev.pointerId);
@@ -579,13 +594,11 @@
 
           saveOrder(items.map((x) => x.name));
 
-          // restore selection by identity
           const newSel = items.findIndex((x) => x.name === selectedName);
           selectedIdx = newSel >= 0 ? newSel : 0;
 
           renderList();
           applyRowActiveClasses();
-          redrawWaveforms();
           loadSelectedIntoRNBO();
         });
 
@@ -600,21 +613,26 @@
     // Transport actions
     // ----------------------------
     async function doPlay() {
-      await primeAudio("play");
+      await primeAudio();
       await loadSelectedIntoRNBO();
 
-      isPlaying = true;
       ui.statusText.innerText = "Playing";
       ui.btnPlay.classList.add("is-on");
+      isPlaying = true;
+
+      playStartCtxTime = context.currentTime;
+      playStartMs = playheadMs;
 
       pulseParam(pPlayTrig);
     }
 
     async function doStop() {
-      await primeAudio("stop");
-      isPlaying = false;
+      await primeAudio();
+
       ui.statusText.innerText = "Stopped";
       ui.btnPlay.classList.remove("is-on");
+      isPlaying = false;
+
       pulseParam(pStopTrig);
 
       playheadMs = 0;
@@ -633,15 +651,10 @@
       doStop();
     });
 
-    ui.btnLoop.addEventListener("click", async (ev) => {
+    ui.btnLoop.addEventListener("click", (ev) => {
       ev.preventDefault();
-      await primeAudio("loop");
-
       isLoop = !isLoop;
-      try {
-        pLoop.value = isLoop ? 1 : 0;
-      } catch (_) {}
-
+      try { pLoop.value = isLoop ? 1 : 0; } catch (_) {}
       ui.btnLoop.classList.toggle("is-on", isLoop);
     });
 
@@ -667,36 +680,66 @@
       }
     });
 
-    // Playhead updates (RNBO outport message)
+    // ----------------------------
+    // Playhead: RNBO outport + fallback estimator
+    // ----------------------------
+    function paintFromPlayhead(now) {
+      const it = items[selectedIdx];
+      if (!it) return;
+
+      const frac = it.durationMs > 0 ? clamp01(playheadMs / it.durationMs) : 0;
+      setProgress(frac);
+      setTime(playheadMs, it.durationMs);
+      redrawWaveforms();
+    }
+
+    // RNBO playhead messages
     if (device.messageEvent?.subscribe) {
       device.messageEvent.subscribe((ev) => {
-        const tag = ev.tag;
+        if (ev.tag !== "playhead") return;
         const payload = ev.payload || [];
-        if (tag !== "playhead" || !payload.length) return;
+        if (!payload.length) return;
 
         playheadMs = Number(payload[0]) || 0;
 
         const now = performance.now();
-        if (now - lastPlayheadPaint < PLAYHEAD_THROTTLE_MS) return;
-        lastPlayheadPaint = now;
+        if (now - lastPaint < PLAYHEAD_THROTTLE_MS) return;
+        lastPaint = now;
 
-        const it = items[selectedIdx];
-        if (!it) return;
-
-        const frac = it.durationMs > 0 ? clamp01(playheadMs / it.durationMs) : 0;
-        setProgress(frac);
-        setTime(playheadMs, it.durationMs);
-        redrawWaveforms();
+        paintFromPlayhead(now);
       });
     }
 
+    // Fallback: if playing and no playhead updates, estimate
+    function tickFallback() {
+      if (!isPlaying) {
+        requestAnimationFrame(tickFallback);
+        return;
+      }
+
+      const it = items[selectedIdx];
+      if (it) {
+        // Estimate elapsed in ms from AudioContext time
+        const elapsed = (context.currentTime - playStartCtxTime) * 1000;
+        const estimated = playStartMs + elapsed;
+
+        // Only drive UI if RNBO isn’t actively updating (i.e., lastPaint stale)
+        const now = performance.now();
+        if (now - lastPaint > 120) {
+          playheadMs = estimated;
+          paintFromPlayhead(now);
+        }
+      }
+
+      requestAnimationFrame(tickFallback);
+    }
+    requestAnimationFrame(tickFallback);
+
     // ----------------------------
-    // Initial draw
+    // Initial render
     // ----------------------------
     renderList();
     setSelected(0);
-
-    // Don’t auto-play (autoplay policies). But do preload buffer into RNBO ASAP.
     loadSelectedIntoRNBO();
   }
 

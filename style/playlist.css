@@ -1,6 +1,6 @@
 /* ==========================================================
    RNBO Playlist UI – Tokenized Dark Skin (Penpot → CSS)
-   Full layout styles for header + transport + rows + waveform
+   Updated: adds Preload %, Rate slider styling, and keeps progress handle driven by JS
    ========================================================== */
 
 :root {
@@ -80,7 +80,7 @@ body {
 }
 
 /* ----------------------------
-   Header (fixed top region)
+   Header
    ---------------------------- */
 #playlist-ui .rnbo-top {
   padding: var(--ui-pad-lg);
@@ -153,6 +153,13 @@ body {
   line-height: 1.48;
 }
 
+#playlist-ui .rnbo-preload {
+  color: var(--ui-text-faint);
+  font-size: 12px;
+  line-height: 1.2;
+  margin-top: 4px;
+}
+
 #playlist-ui .status-badge {
   display: inline-flex;
   align-items: center;
@@ -170,6 +177,7 @@ body {
   align-items: center;
   gap: var(--ui-gap-md);
   margin-bottom: 12px;
+  flex-wrap: wrap;
 }
 
 #playlist-ui .transport-left {
@@ -183,22 +191,25 @@ body {
   min-width: 12px;
 }
 
+#playlist-ui .rate-group,
 #playlist-ui .volume-group {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
+#playlist-ui .rnbo-ratetag,
 #playlist-ui .rnbo-voltag {
   color: var(--ui-text-muted);
   font-size: var(--ui-meta-size);
   letter-spacing: 0.06em;
 }
 
+#playlist-ui .rnbo-ratereadout,
 #playlist-ui .rnbo-volreadout {
   color: var(--ui-text-muted);
   font-size: 14px;
-  min-width: 2.5em;
+  min-width: 3.25em;
   text-align: right;
 }
 
@@ -225,9 +236,9 @@ body {
   box-shadow: 0 0 0 2px rgba(216, 208, 238, 0.18);
 }
 
-/* Slider */
+/* Sliders */
 #playlist-ui .rnbo-slider {
-  width: 280px;
+  width: 220px;
   background: none;
   accent-color: var(--ui-accent);
 }
@@ -303,9 +314,7 @@ body {
   font-size: var(--ui-meta-size);
 }
 
-#playlist-ui .time-spacer {
-  flex: 1 1 auto;
-}
+#playlist-ui .time-spacer { flex: 1 1 auto; }
 
 /* ----------------------------
    Scroll region
@@ -350,7 +359,7 @@ body {
   background: rgba(58, 58, 85, 0.35);
 }
 
-/* Header area inside row */
+/* Row header */
 #playlist-ui .rnbo-row-header {
   display: flex;
   align-items: flex-start;
@@ -358,7 +367,7 @@ body {
   margin-bottom: 10px;
 }
 
-/* Left stack (index + handle) */
+/* Left stack */
 #playlist-ui .rnbo-left-stack {
   display: flex;
   flex-direction: column;
@@ -407,7 +416,7 @@ body {
 }
 #playlist-ui .rnbo-handle:active { cursor: grabbing; }
 
-/* Info stack */
+/* Info */
 #playlist-ui .rnbo-item-info {
   flex: 1 1 auto;
   display: flex;
@@ -432,9 +441,7 @@ body {
 }
 
 /* Waveform */
-#playlist-ui .rnbo-waveform {
-  width: 100%;
-}
+#playlist-ui .rnbo-waveform { width: 100%; }
 
 #playlist-ui .rnbo-canvas {
   width: 100%;
@@ -445,12 +452,10 @@ body {
 }
 
 /* ----------------------------
-   Mobile tuning
+   Mobile
    ---------------------------- */
 @media (max-width: 480px) {
-  #playlist-ui {
-    border-radius: 0;
-  }
+  #playlist-ui { border-radius: 0; }
 
   #playlist-ui .rnbo-top {
     padding: 16px 16px 10px 16px;
@@ -459,17 +464,15 @@ body {
     --fadeH: 20px;
   }
 
-  #playlist-ui .rnbo-scroll {
-    padding: 0 16px 16px 16px;
-  }
-
-  #playlist-ui .rnbo-slider { width: 160px; }
+  #playlist-ui .rnbo-scroll { padding: 0 16px 16px 16px; }
 
   #playlist-ui .rnbo-btn,
   #playlist-ui .rnbo-handle {
     width: var(--ui-btn-m);
     height: var(--ui-btn-m);
   }
+
+  #playlist-ui .rnbo-slider { width: 160px; }
 
   #playlist-ui .rnbo-list {
     margin-top: 16px;
@@ -482,5 +485,4 @@ body {
 @media (max-width: 844px) {
   #playlist-ui .rnbo-top { padding: 36px; }
   #playlist-ui .rnbo-scroll { padding: 0 36px 36px 36px; }
-  #playlist-ui .rnbo-slider { width: auto; }
 }
