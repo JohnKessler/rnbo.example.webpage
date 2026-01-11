@@ -7,9 +7,12 @@
 // - Reverse (loop OFF): stops at 0 and resets UI to 0:00.
 // - Loop toggle while playing does NOT stop and does NOT jump.
 // - Handles monotonic RNBO playhead by rebasing.
+// - Supports header progress seeking when "jumpto" param exists.
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
+// Optional RNBO parameter (by id):
+//   jumpto  (either ms or normalized 0..1; auto-detected)
 // Expected RNBO external buffer name:
 //   "sample"
 // Expected outport message tag (optional):
@@ -40,7 +43,7 @@
   // When playhead port is stale, estimate from AudioContext time
   const PORT_FRESH_MS = 120;
 
-  // Reverse-start assist:
+  // Reverse-start assist fallback:
   // briefly enable loop when rate < 0 so RNBO can wrap to end and run backwards.
   const REVERSE_LOOP_ASSIST_MS = 90;
 
@@ -55,10 +58,6 @@
     if (x < 0) return 0;
     if (x > 1) return 1;
     return x;
-  }
-
-  function pad2(n) {
-    return String(n).padStart(2, "0");
   }
 
   function msToTime(ms) {
@@ -78,7 +77,9 @@
 
   function pulseParam(param, ms = 20) {
     param.value = 1;
-    setTimeout(() => { param.value = 0; }, ms);
+    setTimeout(() => {
+      param.value = 0;
+    }, ms);
   }
 
   async function fetchJSON(url) {
@@ -94,13 +95,17 @@
   }
 
   function saveOrder(names) {
-    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+    } catch (_) {}
   }
 
   function loadOrder() {
     try {
       const raw = localStorage.getItem(ORDER_KEY);
-      return raw ? JSON.parse(raw) : null;
+      if (!raw) return null;
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : null;
     } catch (_) {
       return null;
     }
@@ -112,43 +117,73 @@
     return tag === "input" || tag === "textarea" || t.isContentEditable;
   }
 
+  // Safe element creator (dataset handling)
   function createEl(tag, props = {}, children = []) {
     const el = document.createElement(tag);
-
-    if (props.dataset) {
-      Object.entries(props.dataset).forEach(([k, v]) => (el.dataset[k] = v));
-      delete props.dataset;
+    for (const [k, v] of Object.entries(props || {})) {
+      if (k === "className") el.className = v;
+      else if (k === "innerText") el.innerText = v;
+      else if (k === "ariaLabel") el.setAttribute("aria-label", v);
+      else if (k.startsWith("data-")) el.setAttribute(k, v);
+      else if (k in el) el[k] = v;
+      else el.setAttribute(k, v);
     }
-
-    if (props.ariaLabel) {
-      el.setAttribute("aria-label", props.ariaLabel);
-      delete props.ariaLabel;
-    }
-
-    Object.assign(el, props);
-    children.forEach((c) => el.appendChild(c));
+    for (const c of children) el.appendChild(c);
     return el;
   }
 
-  // Minimal inline SVG icons
-  function iconSVG(pathD) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("width", "18");
-    svg.setAttribute("height", "18");
-    svg.setAttribute("aria-hidden", "true");
-    svg.style.display = "block";
-    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    p.setAttribute("d", pathD);
-    p.setAttribute("fill", "currentColor");
-    svg.appendChild(p);
-    return svg;
-  }
+  function attachHeaderSeparation(scrollEl, topEl) {
+    let lastTop = scrollEl.scrollTop || 0;
+    let lastT = performance.now();
+    let rafPending = false;
 
-  const ICON_PLAY = "M8 5v14l11-7z";
-  const ICON_STOP = "M7 7h10v10H7z";
-  const ICON_LOOP =
-    "M17 1l4 4-4 4V6H7a4 4 0 000 8h1v2H7a6 6 0 010-12h10V1zm-6 14v3l-4-4 4-4v3h6a4 4 0 000-8h-1V3h1a6 6 0 010 12h-6z";
+    function setSep(intensity01, vel01) {
+      const sep = clamp01(intensity01);
+      const shadowA = sep * (0.22 + 0.12 * vel01);
+      const shadowB = sep * (0.16 + 0.08 * vel01);
+      const fadeStart = sep * (0.75 + 0.2 * vel01);
+
+      topEl.style.setProperty("--sep", String(sep));
+      topEl.style.setProperty("--shadowA", shadowA.toFixed(3));
+      topEl.style.setProperty("--shadowB", shadowB.toFixed(3));
+      topEl.style.setProperty("--fadeStart", fadeStart.toFixed(3));
+    }
+
+    function update() {
+      rafPending = false;
+
+      const now = performance.now();
+      const st = scrollEl.scrollTop || 0;
+
+      const dt = Math.max(8, now - lastT);
+      const dy = st - lastTop;
+
+      // px/s
+      const vel = Math.abs(dy) / (dt / 1000);
+
+      // Map velocity to 0..1 (0–1800px/s is the useful range)
+      const vel01 = clamp01(vel / 1800);
+
+      // Presence: only after you’re not at the very top
+      const intensity01 = st > 2 ? 1 : st > 0 ? 0.35 : 0;
+
+      setSep(intensity01, vel01);
+
+      lastTop = st;
+      lastT = now;
+    }
+
+    function onScroll() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(update);
+    }
+
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+
+    // Initialize state
+    setSep((scrollEl.scrollTop || 0) > 2 ? 1 : 0, 0);
+  }
 
   // ----------------------------
   // Waveform
@@ -160,44 +195,67 @@
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1, max = -1;
       const start = x * spp;
-      const end = Math.min(len, (x + 1) * spp);
+      const end = Math.min(len, start + spp);
+
+      let min = 1;
+      let max = -1;
       for (let i = start; i < end; i++) {
-        const v = ch0[i];
-        if (v < min) min = v;
-        if (v > max) max = v;
+        const s = ch0[i];
+        if (s < min) min = s;
+        if (s > max) max = s;
       }
-      peaks[x * 2] = min;
+      peaks[x * 2 + 0] = min;
       peaks[x * 2 + 1] = max;
     }
+
     return peaks;
   }
 
-  function drawWaveform(canvas, peaks, playhead01) {
+  function drawWaveform(canvas, peaks, playFracOrNull) {
     const ctx = canvas.getContext("2d");
     const w = canvas.width;
     const h = canvas.height;
 
     ctx.clearRect(0, 0, w, h);
 
+    // Wave
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1;
+
     ctx.beginPath();
-    for (let x = 0; x < w; x++) {
-      const min = peaks[x * 2];
+    const mid = h * 0.5;
+    const amp = h * 0.42;
+    const N = Math.min(peaks.length / 2, w);
+
+    for (let x = 0; x < N; x++) {
+      const min = peaks[x * 2 + 0];
       const max = peaks[x * 2 + 1];
-      const y1 = (1 - (max * 0.5 + 0.5)) * h;
-      const y2 = (1 - (min * 0.5 + 0.5)) * h;
+
+      const y1 = mid + min * amp;
+      const y2 = mid + max * amp;
+
       ctx.moveTo(x + 0.5, y1);
       ctx.lineTo(x + 0.5, y2);
     }
     ctx.stroke();
 
-    if (playhead01 != null) {
-      const x = clamp01(playhead01) * w;
+    // Playhead overlay
+    if (playFracOrNull != null) {
+      const frac = clamp01(playFracOrNull);
+      const px = Math.round(frac * (w - 1));
+
+      // cursor line
+      ctx.globalAlpha = 1;
       ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
+      ctx.moveTo(px + 0.5, 0);
+      ctx.lineTo(px + 0.5, h);
       ctx.stroke();
+
+      // light fill to left
+      ctx.globalAlpha = 0.12;
+      ctx.fillRect(0, 0, px, h);
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -205,50 +263,39 @@
   // UI Build
   // ----------------------------
   function buildUI() {
-    let root = document.getElementById("playlist-ui");
-    if (!root) {
-      root = document.createElement("div");
-      root.id = "playlist-ui";
-      document.body.appendChild(root);
-    }
+    const root = document.getElementById("playlist-ui");
+    if (!root) throw new Error('Missing #playlist-ui container in playlist.html');
+
+    root.innerHTML = "";
 
     const top = createEl("div", { className: "rnbo-top" });
-    const scroll = createEl("div", { className: "rnbo-scroll" });
 
     const headerRowTitle = createEl("div", { className: "header-row-title" });
+
     const titleStack = createEl("div", { className: "title-stack" }, [
-      createEl("div", { className: "rnbo-title", innerText: "Playlist" }),
-      createEl("div", { className: "rnbo-meta", innerText: "RNBO Web Export" }),
+      createEl("h1", { className: "rnbo-title", innerText: "RNBO Playlist" }),
+      createEl("div", { className: "rnbo-meta", innerText: "Web export playlist" }),
       createEl("div", { className: "rnbo-preload", innerText: "Preload: 0%" }),
     ]);
+
     const statusBadge = createEl("div", { className: "status-badge" }, [
-      createEl("span", { className: "status-text", innerText: "Ready" }),
+      createEl("span", { className: "status-text", innerText: "Loading" }),
     ]);
+
     headerRowTitle.append(titleStack, statusBadge);
 
     const headerRowTransport = createEl("div", { className: "header-row-transport" });
 
-    const btnPlay = createEl(
-      "button",
-      { className: "rnbo-btn rnbo-iconbtn rnbo-play", type: "button", title: "Play", ariaLabel: "Play" },
-      [iconSVG(ICON_PLAY)]
-    );
-    const btnStop = createEl(
-      "button",
-      { className: "rnbo-btn rnbo-iconbtn rnbo-stop", type: "button", title: "Stop", ariaLabel: "Stop" },
-      [iconSVG(ICON_STOP)]
-    );
-    const btnLoop = createEl(
-      "button",
-      { className: "rnbo-btn rnbo-iconbtn rnbo-loop", type: "button", title: "Loop", ariaLabel: "Loop" },
-      [iconSVG(ICON_LOOP)]
-    );
+    const btnPlay = createEl("button", { className: "rnbo-btn rnbo-play", innerText: "▶", ariaLabel: "Play" });
+    const btnStop = createEl("button", { className: "rnbo-btn rnbo-stop", innerText: "■", ariaLabel: "Stop" });
+    const btnLoop = createEl("button", { className: "rnbo-btn rnbo-loop", innerText: "↻", ariaLabel: "Loop" });
+
     const transportLeft = createEl("div", { className: "transport-left" }, [btnPlay, btnStop, btnLoop]);
 
     const rate = createEl("input", {
       className: "rnbo-slider rnbo-rate-slider",
       type: "range",
-      min: -2,
+      min: -1,
       max: 2,
       step: 0.01,
       value: 1,
@@ -265,12 +312,12 @@
       className: "rnbo-slider rnbo-volume-slider",
       type: "range",
       min: 0,
-      max: 1,
-      step: 0.01,
-      value: 1,
+      max: 128,
+      step: 1,
+      value: 120,
       ariaLabel: "Volume",
     });
-    const volVal = createEl("span", { className: "rnbo-readout rnbo-volreadout", innerText: "—" });
+    const volVal = createEl("span", { className: "rnbo-readout rnbo-volreadout", innerText: "120" });
     const volumeGroup = createEl("div", { className: "volume-group" }, [
       createEl("span", { className: "rnbo-meta rnbo-voltag", innerText: "VOL" }),
       vol,
@@ -300,10 +347,13 @@
     headerRowProgress.append(progressTrack, timeRow);
     top.append(headerRowTitle, headerRowTransport, headerRowProgress);
 
+    const scroll = createEl("div", { className: "rnbo-scroll" });
     const list = createEl("div", { className: "rnbo-list" });
     scroll.appendChild(list);
 
-    root.replaceChildren(top, scroll);
+    root.append(top, scroll);
+
+    attachHeaderSeparation(scroll, top);
 
     return {
       root,
@@ -319,6 +369,7 @@
       volVal,
       preloadText: titleStack.querySelector(".rnbo-preload"),
       statusText: statusBadge.querySelector(".status-text"),
+      progressTrack,
       progressFill: progressTrack.querySelector(".progress-fill"),
       progressHandle: progressTrack.querySelector(".progress-handle"),
       timeElapsed: timeRow.querySelector(".time-elapsed"),
@@ -335,6 +386,9 @@
     // RNBO params
     const pClipIndex = ensureParam(device, "clipIndex");
     const pRate = ensureParam(device, "rate");
+    const pJumpTo =
+      device.parametersById?.get("jumpto") ||
+      (device.parameters || []).find((pp) => pp.id === "jumpto");
     const pLoop = ensureParam(device, "loop");
     const pPlayTrig = ensureParam(device, "playTrig");
     const pStopTrig = ensureParam(device, "stopTrig");
@@ -342,64 +396,16 @@
 
     async function primeAudio() {
       try {
-        if (context && context.state !== "running") await context.resume();
+        if (context && context.state !== "running") {
+          await context.resume();
+        }
       } catch (_) {}
     }
 
-    // Bind RATE (auto range)
-    {
-      const rateMin = Number.isFinite(pRate.min) ? pRate.min : -2;
-      const rateMax = Number.isFinite(pRate.max) ? pRate.max : 2;
-      const rateSteps = Number.isFinite(pRate.steps) ? pRate.steps : 0;
-
-      ui.rate.min = String(rateMin);
-      ui.rate.max = String(rateMax);
-      ui.rate.step =
-        rateSteps && rateSteps > 1
-          ? String((rateMax - rateMin) / (rateSteps - 1))
-          : String((rateMax - rateMin) / 1000);
-
-      ui.rate.value = String(pRate.value ?? 1);
-      ui.rateVal.innerText = `${Number(ui.rate.value).toFixed(2)}×`;
-
-      ui.rate.addEventListener("input", () => {
-        const v = Number(ui.rate.value);
-        pRate.value = v;
-        ui.rateVal.innerText = `${v.toFixed(2)}×`;
-      });
-    }
-
-    // Bind VOL (auto range)
-    {
-      const outMin = Number.isFinite(pOutGain.min) ? pOutGain.min : 0;
-      const outMax = Number.isFinite(pOutGain.max) ? pOutGain.max : 1;
-      const outSteps = Number.isFinite(pOutGain.steps) ? pOutGain.steps : 0;
-
-      ui.vol.min = String(outMin);
-      ui.vol.max = String(outMax);
-      ui.vol.step =
-        outSteps && outSteps > 1
-          ? String((outMax - outMin) / (outSteps - 1))
-          : String((outMax - outMin) / 1000);
-
-      const initialOut = Number.isFinite(pOutGain.value)
-        ? pOutGain.value
-        : (outMin + outMax) * 0.75;
-
-      ui.vol.value = String(initialOut);
-      ui.volVal.innerText = String(Math.round(initialOut * 1000) / 1000);
-
-      ui.vol.addEventListener("input", () => {
-        const v = Number(ui.vol.value);
-        pOutGain.value = v;
-        ui.volVal.innerText = String(Math.round(v * 1000) / 1000);
-      });
-    }
-
-    function setProgress(frac01) {
-      const f = clamp01(frac01);
-      ui.progressFill.style.width = `${f * 100}%`;
-      ui.progressHandle.style.left = `${f * 100}%`;
+    function setProgress(frac) {
+      const f = clamp01(frac);
+      ui.progressFill.style.width = `${(f * 100).toFixed(4)}%`;
+      ui.progressHandle.style.left = `${(f * 100).toFixed(4)}%`;
     }
 
     function setTime(elapsedMs, totalMs) {
@@ -472,6 +478,30 @@
       return Number.isFinite(r) ? r : 1;
     }
 
+    function setJumpToMs(targetMs, { startIfNeeded = true } = {}) {
+      if (!pJumpTo) return false;
+      const it = items[selectedIdx];
+      const dur = it?.durationMs || 0;
+      const ms = Math.max(0, Math.min(dur > 0 ? dur : targetMs, targetMs));
+
+      // Some RNBO exports leave jumpto at 0..1 even if the patch expects ms.
+      // Heuristic: if declared max is ~1, treat jumpto as normalized 0..1.
+      const declaredMax = Number(pJumpTo.maximum);
+      const useNormalized = Number.isFinite(declaredMax) && declaredMax <= 1.0001;
+
+      try {
+        pJumpTo.value = useNormalized && dur > 0 ? clamp01(ms / dur) : ms;
+      } catch (_) {}
+
+      if (!startIfNeeded && !isPlayingUI) return true;
+
+      didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
+      displayMs = ms;
+      paintFromRaw(ms);
+      return true;
+    }
+
     const rowEls = [];
 
     function applyRowActiveClasses() {
@@ -494,81 +524,34 @@
       });
     }
 
-    async function loadSelectedIntoRNBO() {
-      const it = items[selectedIdx];
-      if (!it) return;
-      await device.setDataBuffer("sample", it.audioBuffer);
-      pClipIndex.value = selectedIdx;
-    }
-
     function resetUIToStart() {
       displayMs = 0;
       setProgress(0);
       setTime(0, items[selectedIdx]?.durationMs || 0);
       redrawWaveforms();
-      didAutoResetAfterEOF = true;
+    }
+
+    function paintFromRaw(effectiveMs) {
+      const it = items[selectedIdx];
+      const dur = it?.durationMs || 0;
+      const ms = Math.max(0, Math.min(dur > 0 ? dur : effectiveMs, effectiveMs));
+
+      displayMs = ms;
+
+      const frac = dur > 0 ? ms / dur : 0;
+      setProgress(frac);
+      setTime(ms, dur);
+      redrawWaveforms();
     }
 
     function getEffectiveRaw() {
-      const effective = portPlayheadMs - portOffsetMs;
-      return Number.isFinite(effective) ? effective : 0;
-    }
-
-    function normalizeForDisplay(rawMs, totalMs) {
-      if (!Number.isFinite(rawMs) || !Number.isFinite(totalMs) || totalMs <= 0) {
-        return { display: 0, eof: false };
-      }
-
-      if (isLoop) {
-        const mod = rawMs % totalMs;
-        const d = mod < 0 ? mod + totalMs : mod;
-        return { display: d, eof: false };
-      }
-
-      const rateNow = getRateNow();
       const now = performance.now();
+      const raw =
+        now - lastPortAt <= PORT_FRESH_MS
+          ? portPlayheadMs
+          : anchorRawMs + (context.currentTime - anchorCtxTime) * 1000;
 
-      // Reverse EOF: treat <= 0 as end, but NOT during grace window immediately after Play.
-      if (rateNow < 0) {
-        if (now >= reverseEOFIgnoreUntil && rawMs <= END_EPS_MS) {
-          return { display: 0, eof: true };
-        }
-      } else {
-        if (rawMs >= totalMs - END_EPS_MS) {
-          return { display: totalMs, eof: true };
-        }
-      }
-
-      // Clamp
-      if (rawMs < 0) rawMs = 0;
-      if (rawMs > totalMs) rawMs = totalMs;
-
-      return { display: rawMs, eof: false };
-    }
-
-    function paintFromRaw(rawMs) {
-      const it = items[selectedIdx];
-      if (!it) return;
-
-      const norm = normalizeForDisplay(rawMs, it.durationMs);
-      displayMs = norm.display;
-
-      if (norm.eof && !isLoop) {
-        if (isPlayingUI) {
-          isPlayingUI = false;
-          ui.btnPlay.classList.remove("is-on");
-          ui.statusText.innerText = "Ready";
-        }
-
-        pulseParam(pStopTrig);
-        resetUIToStart();
-        return;
-      }
-
-      const frac = it.durationMs > 0 ? clamp01(displayMs / it.durationMs) : 0;
-      setProgress(frac);
-      setTime(displayMs, it.durationMs);
-      redrawWaveforms();
+      return raw - portOffsetMs;
     }
 
     function renderList() {
@@ -576,100 +559,126 @@
       rowEls.length = 0;
 
       items.forEach((it, idx) => {
-        const indexBadge = createEl("div", { className: "rnbo-index", innerText: pad2(idx + 1) });
+        const row = createEl("div", { className: "rnbo-row", "data-index": String(idx) });
 
-        const handle = createEl(
-          "button",
-          { className: "rnbo-handle", type: "button", ariaLabel: "Reorder", title: "Drag to reorder" },
-          [createEl("span", { innerText: "≡≡" })]
-        );
+        const leftStack = createEl("div", { className: "rnbo-left-stack" }, [
+          createEl("div", { className: "rnbo-index", innerText: String(idx + 1) }),
+          createEl("button", { className: "rnbo-handle", ariaLabel: "Drag" }, [
+            createEl("span", { innerText: "DRAG" }),
+          ]),
+        ]);
 
-        const leftStack = createEl("div", { className: "rnbo-left-stack" }, [indexBadge, handle]);
+        const info = createEl("div", { className: "rnbo-item-info" }, [
+          createEl("div", { className: "rnbo-item-title", innerText: it.name }),
+          createEl("div", { className: "rnbo-item-meta", innerText: `${msToTime(it.durationMs)} • ${Math.round(it.audioBuffer.sampleRate)} Hz` }),
+        ]);
 
-        const title = createEl("div", { className: "rnbo-item-title", innerText: it.name });
-        const meta = createEl("div", {
-          className: "rnbo-item-meta",
-          innerText: `${msToTime(it.durationMs)} • ${Math.round(it.audioBuffer.sampleRate / 100) / 10}kHz`,
-        });
-
-        const info = createEl("div", { className: "rnbo-item-info" }, [title, meta]);
         const header = createEl("div", { className: "rnbo-row-header" }, [leftStack, info]);
 
-        const canvas = createEl("canvas", { className: "rnbo-canvas" });
-        canvas.width = WAVE_W;
-        canvas.height = WAVE_H;
-
-        const waveformWrap = createEl("div", { className: "rnbo-waveform" }, [canvas]);
-
-        const row = createEl("div", {
-          className: "rnbo-row" + (idx === selectedIdx ? " selected is-active" : ""),
-          draggable: true,
-          dataset: { idx: String(idx) },
-        }, [header, waveformWrap]);
-
-        drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null);
-        row.addEventListener("click", () => setSelected(idx));
-
-        // Drag reorder (arm drag only from handle)
-        let dragArmed = false;
-
-        handle.addEventListener("pointerdown", (ev) => {
-          dragArmed = true;
-          handle.setPointerCapture?.(ev.pointerId);
+        const canvas = createEl("canvas", {
+          className: "rnbo-canvas",
+          width: WAVE_W,
+          height: WAVE_H,
         });
 
-        handle.addEventListener("pointerup", (ev) => {
-          dragArmed = false;
-          handle.releasePointerCapture?.(ev.pointerId);
+        const waveform = createEl("div", { className: "rnbo-waveform" }, [canvas]);
+
+        row.append(header, waveform);
+
+        // selection
+        row.addEventListener("click", (ev) => {
+          const t = ev.target;
+          if (t && (t.closest?.(".rnbo-handle") || t.classList?.contains("rnbo-handle"))) return;
+          setSelected(idx).catch(console.error);
         });
 
-        row.addEventListener("dragstart", (ev) => {
-          if (!dragArmed) {
+        // drag reorder
+        const handle = row.querySelector(".rnbo-handle");
+        if (handle) {
+          handle.addEventListener("pointerdown", (ev) => {
             ev.preventDefault();
-            return;
-          }
-          row.classList.add("dragging", "is-dragging");
-          ev.dataTransfer.effectAllowed = "move";
-          ev.dataTransfer.setData("text/plain", String(idx));
-        });
+            const from = idx;
 
-        row.addEventListener("dragend", () => {
-          dragArmed = false;
-          row.classList.remove("dragging", "is-dragging");
-        });
+            row.classList.add("is-dragging");
+            let overIdx = from;
 
-        row.addEventListener("dragover", (ev) => {
-          ev.preventDefault();
-          ev.dataTransfer.dropEffect = "move";
-        });
+            function findOverIndex(clientY) {
+              const rects = rowEls.map((r) => r.getBoundingClientRect());
+              let best = from;
+              let bestDist = Infinity;
+              for (let i = 0; i < rects.length; i++) {
+                const mid = (rects[i].top + rects[i].bottom) / 2;
+                const d = Math.abs(clientY - mid);
+                if (d < bestDist) {
+                  bestDist = d;
+                  best = i;
+                }
+              }
+              return best;
+            }
 
-        row.addEventListener("drop", (ev) => {
-          ev.preventDefault();
-          const from = Number(ev.dataTransfer.getData("text/plain"));
-          const to = idx;
-          if (!Number.isFinite(from) || from === to) return;
+            function onMove(e) {
+              overIdx = findOverIndex(e.clientY);
+            }
 
-          const selectedName = items[selectedIdx]?.name;
+            function onUp() {
+              window.removeEventListener("pointermove", onMove);
+              row.classList.remove("is-dragging");
 
-          const moved = items.splice(from, 1)[0];
-          items.splice(to, 0, moved);
+              const to = overIdx;
+              if (to !== from) {
+                const selectedName = items[selectedIdx]?.name;
 
-          saveOrder(items.map((x) => x.name));
+                const moved = items.splice(from, 1)[0];
+                items.splice(to, 0, moved);
 
-          const newSel = items.findIndex((x) => x.name === selectedName);
-          selectedIdx = newSel >= 0 ? newSel : 0;
+                saveOrder(items.map((x) => x.name));
 
-          renderList();
-          applyRowActiveClasses();
-          loadSelectedIntoRNBO().catch(console.error);
-          resetUIToStart();
-        });
+                const newSel = items.findIndex((x) => x.name === selectedName);
+                selectedIdx = newSel >= 0 ? newSel : 0;
+
+                renderList();
+                applyRowActiveClasses();
+                loadSelectedIntoRNBO().catch(console.error);
+                resetUIToStart();
+              }
+            }
+
+            window.addEventListener("pointermove", onMove, { passive: true });
+            window.addEventListener("pointerup", onUp, { passive: true, once: true });
+          });
+        }
 
         ui.list.appendChild(row);
         rowEls.push(row);
       });
 
+      // initial draw
+      rowEls.forEach((row, idx) => {
+        const canvas = row.querySelector("canvas.rnbo-canvas");
+        if (!canvas) return;
+        drawWaveform(canvas, items[idx].peaks, null);
+      });
+
       applyRowActiveClasses();
+    }
+
+    async function loadSelectedIntoRNBO() {
+      const it = items[selectedIdx];
+      if (!it) return;
+
+      try {
+        pClipIndex.value = selectedIdx;
+      } catch (_) {}
+
+      // prime UI readouts
+      ui.rate.value = String(pRate.value);
+      ui.rateVal.innerText = `${Number(pRate.value).toFixed(2)}×`;
+
+      ui.vol.value = String(pOutGain.value);
+      ui.volVal.innerText = String(Math.round(Number(pOutGain.value)));
+
+      ui.statusText.innerText = "Ready";
     }
 
     async function setSelected(idx) {
@@ -722,24 +731,35 @@
       ui.btnPlay.classList.add("is-on");
       ui.statusText.innerText = "Playing";
 
-      // Reverse-start assist:
-      // If rate < 0 AND loop is currently OFF, briefly enable RNBO loop to allow wrap/start.
+      // Reverse-start assist for negative rate:
+      // If rate < 0 and loop is OFF, jump near the end, then play.
+      // This avoids the "can’t start unless loop is enabled" behavior on some RNBO patches.
       const rateNow = getRateNow();
       if (rateNow < 0 && !isLoop) {
+        const it = items[selectedIdx];
+        const dur = it?.durationMs || 0;
+
+        // Prefer jumpto if available
+        if (pJumpTo && dur > 0) {
+          setJumpToMs(Math.max(0, dur - 1), { startIfNeeded: false });
+          pulseParam(pPlayTrig);
+          return;
+        }
+
+        // Fallback: briefly enable loop internally so RNBO can wrap and run backwards
         try {
           pLoop.value = 1; // do NOT change UI button state
-          // Trigger play while loop is briefly enabled
           pulseParam(pPlayTrig);
 
           setTimeout(() => {
-            // restore loop OFF
-            try { pLoop.value = 0; } catch (_) {}
+            try {
+              pLoop.value = 0;
+            } catch (_) {}
           }, REVERSE_LOOP_ASSIST_MS);
 
           return;
         } catch (err) {
-          console.warn("Reverse loop-assist failed; falling back to normal play.", err);
-          // fall through
+          console.warn("Reverse start assist failed; falling back to normal play.", err);
         }
       }
 
@@ -778,7 +798,9 @@
       const wasLoop = isLoop;
       isLoop = !isLoop;
 
-      try { pLoop.value = isLoop ? 1 : 0; } catch (_) {}
+      try {
+        pLoop.value = isLoop ? 1 : 0;
+      } catch (_) {}
       ui.btnLoop.classList.toggle("is-on", isLoop);
 
       // If turning LOOP OFF mid-play, rebase effective time to prevent jump-to-EOF.
@@ -797,26 +819,75 @@
       paintFromRaw(getEffectiveRaw());
     });
 
-    // Keyboard shortcuts
-    window.addEventListener("keydown", (ev) => {
-      if (isTextInputTarget(ev.target)) return;
+    // ----------------------------
+    // Seek via header progress bar (requires jumpto param)
+    // ----------------------------
+    (function bindSeek() {
+      if (!ui.progressTrack) return;
 
-      if (ev.key === "ArrowDown") {
-        ev.preventDefault();
-        setSelected(selectedIdx + 1).catch(console.error);
-      } else if (ev.key === "ArrowUp") {
-        ev.preventDefault();
-        setSelected(selectedIdx - 1).catch(console.error);
-      } else if (ev.key === " " || ev.code === "Space") {
-        ev.preventDefault();
-        playFromBeginning().catch(console.error);
-      } else if (ev.key.toLowerCase() === "s" || ev.key === "Escape") {
-        ev.preventDefault();
-        stopNow();
-      } else if (ev.key.toLowerCase() === "l") {
-        ev.preventDefault();
-        ui.btnLoop.click();
+      function seekFromEvent(ev) {
+        const it = items[selectedIdx];
+        if (!it || it.durationMs <= 0) return;
+        const r = ui.progressTrack.getBoundingClientRect();
+        const x =
+          "clientX" in ev
+            ? ev.clientX
+            : ev.touches && ev.touches[0]
+              ? ev.touches[0].clientX
+              : 0;
+
+        const frac = clamp01((x - r.left) / Math.max(1, r.width));
+        const ms = frac * it.durationMs;
+
+        // If jumpto exists, use it; otherwise we can only "fake" UI (won't affect audio).
+        const ok = setJumpToMs(ms, { startIfNeeded: true });
+        if (!ok) {
+          didAutoResetAfterEOF = false;
+          displayMs = ms;
+          paintFromRaw(ms);
+        }
       }
+
+      let dragging = false;
+
+      function onDown(ev) {
+        dragging = true;
+        ev.preventDefault();
+        seekFromEvent(ev);
+        window.addEventListener("pointermove", onMove, { passive: false });
+        window.addEventListener("pointerup", onUp, { passive: true, once: true });
+      }
+      function onMove(ev) {
+        if (!dragging) return;
+        ev.preventDefault();
+        seekFromEvent(ev);
+      }
+      function onUp() {
+        dragging = false;
+        window.removeEventListener("pointermove", onMove);
+      }
+
+      ui.progressTrack.addEventListener("pointerdown", onDown, { passive: false });
+      ui.progressTrack.style.touchAction = "none";
+    })();
+
+    // Sliders -> RNBO params
+    ui.rate.addEventListener("input", () => {
+      const v = Number(ui.rate.value);
+      if (!Number.isFinite(v)) return;
+      try {
+        pRate.value = v;
+      } catch (_) {}
+      ui.rateVal.innerText = `${v.toFixed(2)}×`;
+    });
+
+    ui.vol.addEventListener("input", () => {
+      const v = Number(ui.vol.value);
+      if (!Number.isFinite(v)) return;
+      try {
+        pOutGain.value = v;
+      } catch (_) {}
+      ui.volVal.innerText = String(Math.round(v));
     });
 
     // ----------------------------
@@ -832,42 +903,119 @@
         portPlayheadMs = v;
         lastPortAt = performance.now();
 
-        // Sync fallback anchor to effective time
+        // Update anchor for fallback estimation
         anchorCtxTime = context.currentTime;
-        anchorRawMs = getEffectiveRaw();
+        anchorRawMs = v - portOffsetMs;
       });
     }
 
-    // UI tick loop
+    // ----------------------------
+    // Animation/update loop
+    // ----------------------------
     let lastPaintAt = 0;
 
     function tick() {
+      requestAnimationFrame(tick);
+
       const now = performance.now();
+      if (now - lastPaintAt < UI_THROTTLE_MS) return;
+      lastPaintAt = now;
+
+      const it = items[selectedIdx];
+      if (!it) return;
+
+      const dur = it.durationMs || 0;
+      if (dur <= 0) return;
+
+      const effective = getEffectiveRaw();
+
+      // EOF handling
+      const rate = getRateNow();
 
       if (isPlayingUI) {
-        const portFresh = now - lastPortAt < PORT_FRESH_MS;
+        if (!isLoop) {
+          if (rate >= 0) {
+            // forward EOF: stop at end
+            if (effective >= dur - END_EPS_MS) {
+              isPlayingUI = false;
+              ui.btnPlay.classList.remove("is-on");
+              ui.statusText.innerText = "Ready";
+              didAutoResetAfterEOF = true;
 
-        if (!portFresh) {
-          const elapsedSec = Math.max(0, context.currentTime - anchorCtxTime);
-          const rateNow = getRateNow() || 1;
-          const estRaw = anchorRawMs + elapsedSec * 1000 * rateNow;
-          paintFromRaw(estRaw);
-        } else {
-          paintFromRaw(getEffectiveRaw());
+              // hard reset UI to 0
+              portPlayheadMs = 0;
+              lastPortAt = 0;
+              portOffsetMs = 0;
+              anchorCtxTime = context.currentTime;
+              anchorRawMs = 0;
+
+              resetUIToStart();
+              return;
+            }
+          } else {
+            // reverse EOF: stop at 0
+            const ignore = reverseEOFIgnoreUntil && performance.now() < reverseEOFIgnoreUntil;
+            if (!ignore && effective <= 0 + END_EPS_MS) {
+              isPlayingUI = false;
+              ui.btnPlay.classList.remove("is-on");
+              ui.statusText.innerText = "Ready";
+              didAutoResetAfterEOF = true;
+
+              portPlayheadMs = 0;
+              lastPortAt = 0;
+              portOffsetMs = 0;
+              anchorCtxTime = context.currentTime;
+              anchorRawMs = 0;
+
+              resetUIToStart();
+              return;
+            }
+          }
         }
       } else {
-        if (!didAutoResetAfterEOF) paintFromRaw(0);
+        if (didAutoResetAfterEOF) {
+          // already reset; do nothing
+        }
       }
 
-      if (now - lastPaintAt >= UI_THROTTLE_MS) lastPaintAt = now;
-      requestAnimationFrame(tick);
+      // Paint
+      paintFromRaw(effective);
     }
 
-    // Init render
+    // Keyboard shortcuts
+    window.addEventListener(
+      "keydown",
+      (ev) => {
+        if (isTextInputTarget(ev.target)) return;
+        if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+
+        if (ev.key === "ArrowDown") {
+          ev.preventDefault();
+          setSelected(selectedIdx + 1).catch(console.error);
+        } else if (ev.key === "ArrowUp") {
+          ev.preventDefault();
+          setSelected(selectedIdx - 1).catch(console.error);
+        } else if (ev.key === " " || ev.code === "Space") {
+          ev.preventDefault();
+          playFromBeginning().catch(console.error);
+        } else if (ev.key.toLowerCase() === "s" || ev.key === "Escape") {
+          ev.preventDefault();
+          stopNow();
+        } else if (ev.key.toLowerCase() === "l") {
+          ev.preventDefault();
+          ui.btnLoop.click();
+        }
+      },
+      { passive: false }
+    );
+
+    // Initial render/load
     renderList();
-    await setSelected(0);
+    await loadSelectedIntoRNBO();
+    resetUIToStart();
     requestAnimationFrame(tick);
   }
 
+  // Expose global initializer for app.js
   window.initPlaylistUI = initPlaylistUI;
 })();
