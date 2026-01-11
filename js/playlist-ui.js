@@ -1,16 +1,21 @@
 // playlist-ui.js
 // RNBO Playlist UI — stable core behavior + styled UI
 //
+// Version: v1.0.1
+//
 // Updates in this version:
-// - Adds "jumpto" support (optional). If jumpto exists it is used for deterministic Play and reverse start.
-// - Default outGain set to 120 (matches your patch).
-// - Keeps existing functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
-//   drag reorder + persistence, keyboard shortcuts, touch interactions, volume via outGain.
+// - Uses "jumpto" as milliseconds with fixed param range: min=0, max=600000
+// - Removes any normalized (0..1) fallback logic (no longer needed)
+// - Clamps jumpto to track duration (durationMs - 1) when known
+// - Resets jumpto to 0 on Stop / Selection / EOF to keep Play deterministic
+//
+// Keeps existing functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
+// drag reorder + persistence, keyboard shortcuts, touch interactions, volume via outGain.
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
 // Optional RNBO parameter (by id):
-//   jumpto  (ms; if patch export range is 0..1, we auto-normalize until you fix max)
+//   jumpto  (milliseconds, min 0, max 600000)
 // Expected RNBO external buffer name:
 //   "sample"
 // Expected port message tag (outport):
@@ -32,6 +37,10 @@
   const DEFAULT_OUTGAIN = 120;
 
   const PLAYHEAD_THROTTLE_MS = 16;
+
+  // jumpto param range (as you set in the patch)
+  const JUMPTO_MIN_MS = 0;
+  const JUMPTO_MAX_MS = 600000;
 
   // ----------------------------
   // Helpers
@@ -109,7 +118,7 @@
   }
 
   // ----------------------------
-  // Premium header effects (your file already had this)
+  // Premium header effects
   // ----------------------------
   function installPremiumHeaderEffects(topEl, scrollEl) {
     if (!topEl || !scrollEl) return;
@@ -161,7 +170,7 @@
   }
 
   // ----------------------------
-  // Waveform drawing (your existing approach)
+  // Waveform drawing
   // ----------------------------
   function buildPeaks(audioBuffer, width) {
     const ch0 = audioBuffer.getChannelData(0);
@@ -216,7 +225,7 @@
   }
 
   // ----------------------------
-  // Icons (kept)
+  // Icons
   // ----------------------------
   function playIconSVG() {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -244,7 +253,7 @@
   }
 
   // ----------------------------
-  // UI Build (your existing structure)
+  // UI Build
   // ----------------------------
   function buildUI() {
     const root = document.getElementById("playlist-ui");
@@ -316,13 +325,20 @@
       volVal,
     ]);
 
-    const controls = createEl("div", { className: "rnbo-controls" }, [btnPlay, btnStop, loopLabel, rateLabel, volLabel]);
+    const controls = createEl("div", { className: "rnbo-controls" }, [
+      btnPlay,
+      btnStop,
+      loopLabel,
+      rateLabel,
+      volLabel,
+    ]);
 
     const playheadReadout = createEl("div", { className: "rnbo-readout", innerText: "Playhead: 0 ms" });
 
     const hint = createEl("div", {
       className: "rnbo-hint rnbo-readout",
-      innerText: "Shortcuts: Space play/stop · Arrows prev/next · Enter play · Esc stop · L loop · Drag ☰ to reorder",
+      innerText:
+        "Shortcuts: Space play/stop · Arrows prev/next · Enter play · Esc stop · L loop · Drag ☰ to reorder",
     });
 
     const list = createEl("div", { className: "rnbo-list" });
@@ -369,7 +385,8 @@
     // RNBO params
     const pClipIndex = ensureParam(device, "clipIndex");
     const pRate = ensureParam(device, "rate");
-    const pJumpTo = (device.parametersById?.get("jumpto") || (device.parameters || []).find(p => p.id === "jumpto")) || null;
+    const pJumpTo =
+      (device.parametersById?.get("jumpto") || (device.parameters || []).find((p) => p.id === "jumpto")) || null;
     const pLoop = ensureParam(device, "loop");
     const pPlayTrig = ensureParam(device, "playTrig");
     const pStopTrig = ensureParam(device, "stopTrig");
@@ -382,22 +399,32 @@
       } catch (_) {}
     }
 
-    // Optional jump-to parameter (ms). Some exports default to 0..1 if min/max not set.
+    // Optional jump-to parameter (milliseconds, range defined in patch)
     function supportsJumpTo() {
       return !!pJumpTo && typeof pJumpTo.value === "number";
+    }
+
+    function clampJumpToMs(ms, durationMsOrNull) {
+      let v = Number(ms);
+      if (!Number.isFinite(v)) v = 0;
+
+      // clamp to param range first
+      v = Math.max(JUMPTO_MIN_MS, Math.min(JUMPTO_MAX_MS, v));
+
+      // clamp to track duration if provided; avoid exactly "end" by using duration-1
+      const dur = Number(durationMsOrNull);
+      if (Number.isFinite(dur) && dur > 1) {
+        v = Math.max(0, Math.min(v, Math.floor(dur - 1)));
+      }
+      return v;
     }
 
     function setJumpToMs(targetMs, itemDurationMs) {
       if (!supportsJumpTo()) return false;
 
-      const dur = Math.max(0, Number(itemDurationMs) || 0);
-      const ms = Math.max(0, dur > 0 ? Math.min(targetMs, dur) : targetMs);
-
-      const declaredMax = Number(pJumpTo.maximum ?? pJumpTo.max ?? pJumpTo.maximumValue);
-      const useNormalized = Number.isFinite(declaredMax) && declaredMax <= 1.0001;
-
+      const v = clampJumpToMs(targetMs, itemDurationMs);
       try {
-        pJumpTo.value = (useNormalized && dur > 0) ? clamp01(ms / dur) : ms;
+        pJumpTo.value = v;
         return true;
       } catch (e) {
         console.warn("Failed to set jumpto:", e);
@@ -453,11 +480,19 @@
       selectedName = items[idx].name;
 
       // Set clipIndex (if patch uses it)
-      try { pClipIndex.value = idx; } catch (_) {}
+      try {
+        pClipIndex.value = idx;
+      } catch (_) {}
 
       endedAndStopped = true;
       isPlaying = false;
       lastPlayheadMs = 0;
+
+      // Reset position for determinism (if jumpto exists)
+      const it = items[idx];
+      if (it && supportsJumpTo()) {
+        setJumpToMs(0, it.durationMs);
+      }
 
       ui.playheadReadout.innerText = "Playhead: 0 ms";
       renderList();
@@ -471,7 +506,7 @@
     }
 
     // ----------------------------
-    // Drag reorder (kept)
+    // Drag reorder
     // ----------------------------
     const dragState = {
       active: false,
@@ -588,32 +623,46 @@
       const isReverse = Number.isFinite(rateNow) && rateNow < 0;
       const loopOn = (pLoop.value ?? 0) >= 0.5;
 
-      // If we have jumpto, use it as the authoritative "start position" (and it will start playback if needed).
-      // This avoids needing Stop to "re-arm" after EOF.
-      if (supportsJumpTo() && dur > 0) {
-        const startMs = isReverse ? Math.max(0, dur - 1) : 0;
-        setJumpToMs(startMs, dur);
+      // If we ended previously, make sure we’re re-armed.
+      // This avoids “must press Stop after EOF” behavior.
+      if (endedAndStopped) {
+        pulseParam(pStopTrig);
+        lastPlayheadMs = 0;
+        ui.playheadReadout.innerText = "Playhead: 0 ms";
+        redrawSelected(0);
 
-        // For reverse + loop OFF, this is the key fix: don't try to play from 0.
-        // Setting jumpto to end gives the engine room to move backward.
+        // reset position for determinism
+        if (supportsJumpTo() && dur > 0) setJumpToMs(0, dur);
+      }
+
+      // If we have jumpto, use it as the authoritative "start position".
+      // Your patch behavior: jumpto jumps to ms and starts playback if necessary.
+      if (supportsJumpTo() && dur > 0) {
+        if (isReverse && !loopOn) {
+          // key reverse fix: start from near end so reverse can move immediately
+          setJumpToMs(dur - 1, dur);
+        } else {
+          // normal: deterministic from beginning
+          setJumpToMs(0, dur);
+        }
+
         endedAndStopped = false;
         isPlaying = true;
 
-        // Some patches still require playTrig even if jumpto starts playback; this pulse is safe.
+        // Some patches still require playTrig even if jumpto starts playback.
+        // Keeping it for safety.
         pulseParam(pPlayTrig);
         return;
       }
 
-      // Fallback path (no jumpto): if we've ended before, send stop then play to re-arm.
-      if (endedAndStopped) pulseParam(pStopTrig);
-
+      // Fallback (no jumpto)
       endedAndStopped = false;
       isPlaying = true;
       pulseParam(pPlayTrig);
 
-      // Reverse + loop OFF without jumpto is inherently unreliable; warn once.
+      // Reverse + loop OFF without jumpto can be unreliable by design.
       if (isReverse && !loopOn) {
-        console.warn("Reverse playback with loop OFF is limited without 'jumpto' param range set.");
+        console.warn("Reverse playback with loop OFF is limited without 'jumpto'.");
       }
     }
 
@@ -686,12 +735,17 @@
 
       const loopOn = (pLoop.value ?? 0) >= 0.5;
 
-      // EOF detection: your patch reports playhead resetting to 0 at end when loop is off.
-      // This works for forward EOF, and also for reverse EOF (hitting 0 from >0).
+      // EOF detection: if loop is OFF and playhead drops to 0 after being >0.
       if (!loopOn && !endedAndStopped && ms <= 0 && lastPlayheadMs > 0) {
         pulseParam(pStopTrig);
         isPlaying = false;
         endedAndStopped = true;
+
+        // Reset jumpto to 0 (helps deterministic next Play)
+        const it = items[getSelectedIndex()];
+        if (it && supportsJumpTo() && it.durationMs > 0) {
+          setJumpToMs(0, it.durationMs);
+        }
 
         ui.playheadReadout.innerText = "Playhead: 0 ms";
         redrawSelected(0);
