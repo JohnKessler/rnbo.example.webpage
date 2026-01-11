@@ -1,12 +1,12 @@
 // playlist-ui.js
-// RNBO Playlist UI — restore stable core behavior + keep styled UI
+// RNBO Playlist UI — stable core behavior + styled UI
 //
-// Behavior guarantees:
-// - Play ALWAYS starts from beginning (0:00), even after EOF or Stop.
-// - At EOF (loop OFF) UI auto-resets to 0:00 (does not hang at end).
-// - Reverse playback (rate < 0): when playhead reaches 0, it resets + re-arms Play.
-// - Loop toggle while playing does NOT stop, does NOT jump to end.
-// - If RNBO playhead is monotonic (keeps counting through loops), UI rebases it.
+// Guarantees:
+// - Play ALWAYS starts from 0:00 (forward) or "reverse-assist" if rate < 0.
+// - EOF (loop OFF): forward stops at end and resets UI to 0:00.
+// - Reverse (loop OFF): stops at 0 and resets UI to 0:00.
+// - Loop toggle while playing does NOT stop and does NOT jump.
+// - Handles monotonic RNBO playhead by rebasing.
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
@@ -37,8 +37,16 @@
   // End detection slack (ms)
   const END_EPS_MS = 15;
 
-  // When playhead port is stale, we can optionally estimate from AudioContext time
+  // When playhead port is stale, estimate from AudioContext time
   const PORT_FRESH_MS = 120;
+
+  // Reverse-start assist:
+  // briefly enable loop when rate < 0 so RNBO can wrap to end and run backwards.
+  const REVERSE_LOOP_ASSIST_MS = 90;
+
+  // Grace window after Play where we do NOT treat "rawMs <= 0" as reverse EOF
+  // (prevents instant stop at t=0 before RNBO has time to wrap/advance).
+  const REVERSE_EOF_GRACE_MS = 250;
 
   // ----------------------------
   // Helpers
@@ -70,9 +78,7 @@
 
   function pulseParam(param, ms = 20) {
     param.value = 1;
-    setTimeout(() => {
-      param.value = 0;
-    }, ms);
+    setTimeout(() => { param.value = 0; }, ms);
   }
 
   async function fetchJSON(url) {
@@ -88,9 +94,7 @@
   }
 
   function saveOrder(names) {
-    try {
-      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
-    } catch (_) {}
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
   }
 
   function loadOrder() {
@@ -156,8 +160,7 @@
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1,
-        max = -1;
+      let min = 1, max = -1;
       const start = x * spp;
       const end = Math.min(len, (x + 1) * spp);
       for (let i = start; i < end; i++) {
@@ -212,7 +215,6 @@
     const top = createEl("div", { className: "rnbo-top" });
     const scroll = createEl("div", { className: "rnbo-scroll" });
 
-    // Title + status + preload
     const headerRowTitle = createEl("div", { className: "header-row-title" });
     const titleStack = createEl("div", { className: "title-stack" }, [
       createEl("div", { className: "rnbo-title", innerText: "Playlist" }),
@@ -224,7 +226,6 @@
     ]);
     headerRowTitle.append(titleStack, statusBadge);
 
-    // Transport row
     const headerRowTransport = createEl("div", { className: "header-row-transport" });
 
     const btnPlay = createEl(
@@ -244,7 +245,6 @@
     );
     const transportLeft = createEl("div", { className: "transport-left" }, [btnPlay, btnStop, btnLoop]);
 
-    // Rate group
     const rate = createEl("input", {
       className: "rnbo-slider rnbo-rate-slider",
       type: "range",
@@ -261,7 +261,6 @@
       rateVal,
     ]);
 
-    // Volume group
     const vol = createEl("input", {
       className: "rnbo-slider rnbo-volume-slider",
       type: "range",
@@ -285,7 +284,6 @@
       volumeGroup
     );
 
-    // Progress + time row
     const headerRowProgress = createEl("div", { className: "header-row-progress" });
 
     const progressTrack = createEl("div", { className: "progress-track" }, [
@@ -302,7 +300,6 @@
     headerRowProgress.append(progressTrack, timeRow);
     top.append(headerRowTitle, headerRowTransport, headerRowProgress);
 
-    // List
     const list = createEl("div", { className: "rnbo-list" });
     scroll.appendChild(list);
 
@@ -343,20 +340,11 @@
     const pStopTrig = ensureParam(device, "stopTrig");
     const pOutGain = ensureParam(device, "outGain");
 
-    // Prime audio on gesture
     async function primeAudio() {
       try {
         if (context && context.state !== "running") await context.resume();
       } catch (_) {}
     }
-
-    ["pointerdown", "click"].forEach((evt) => {
-      ui.btnPlay.addEventListener(evt, primeAudio, { passive: true });
-      ui.btnStop.addEventListener(evt, primeAudio, { passive: true });
-      ui.btnLoop.addEventListener(evt, primeAudio, { passive: true });
-      ui.rate.addEventListener(evt, primeAudio, { passive: true });
-      ui.vol.addEventListener(evt, primeAudio, { passive: true });
-    });
 
     // Bind RATE (auto range)
     {
@@ -408,7 +396,6 @@
       });
     }
 
-    // UI helpers
     function setProgress(frac01) {
       const f = clamp01(frac01);
       ui.progressFill.style.width = `${f * 100}%`;
@@ -434,7 +421,7 @@
       ordered = kept.concat(missing);
     }
 
-    // Decode + peaks (with preload %)
+    // Decode + peaks
     const items = [];
     for (let i = 0; i < ordered.length; i++) {
       const name = ordered[i];
@@ -458,29 +445,33 @@
     let selectedIdx = 0;
     let isLoop = false;
 
-    // “UI playing” flag (used for play semantics + fallback ticking)
     let isPlayingUI = false;
 
-    // RNBO playhead raw (can be monotonic)
+    // RNBO playhead raw (monotonic)
     let portPlayheadMs = 0;
     let lastPortAt = 0;
 
-    // A rebase offset applied to port playhead
+    // Rebase offset applied to port playhead
     let portOffsetMs = 0;
 
     // Fallback anchor (if port stalls)
     let anchorCtxTime = 0;
     let anchorRawMs = 0;
 
-    // Displayed playhead (after loop wrap / clamp)
+    // Displayed playhead
     let displayMs = 0;
 
-    // Prevent repainting to start constantly when idle
+    // Prevent resetting repeatedly while idle
     let didAutoResetAfterEOF = false;
 
-    // ----------------------------
-    // Playlist rows
-    // ----------------------------
+    // Reverse EOF grace after pressing play (prevents instant reverse-EOF at t=0)
+    let reverseEOFIgnoreUntil = 0;
+
+    function getRateNow() {
+      const r = Number(pRate.value);
+      return Number.isFinite(r) ? r : 1;
+    }
+
     const rowEls = [];
 
     function applyRowActiveClasses() {
@@ -518,9 +509,9 @@
       didAutoResetAfterEOF = true;
     }
 
-    function getRateNow() {
-      const r = Number(pRate.value);
-      return Number.isFinite(r) ? r : 1;
+    function getEffectiveRaw() {
+      const effective = portPlayheadMs - portOffsetMs;
+      return Number.isFinite(effective) ? effective : 0;
     }
 
     function normalizeForDisplay(rawMs, totalMs) {
@@ -534,18 +525,21 @@
         return { display: d, eof: false };
       }
 
-      // Loop OFF:
-      // Forward: EOF at >= duration
-      // Reverse: EOF at <= 0
       const rateNow = getRateNow();
+      const now = performance.now();
 
+      // Reverse EOF: treat <= 0 as end, but NOT during grace window immediately after Play.
       if (rateNow < 0) {
-        if (rawMs <= END_EPS_MS) return { display: 0, eof: true };
+        if (now >= reverseEOFIgnoreUntil && rawMs <= END_EPS_MS) {
+          return { display: 0, eof: true };
+        }
       } else {
-        if (rawMs >= totalMs - END_EPS_MS) return { display: totalMs, eof: true };
+        if (rawMs >= totalMs - END_EPS_MS) {
+          return { display: totalMs, eof: true };
+        }
       }
 
-      // Clamp display inside bounds for sanity
+      // Clamp
       if (rawMs < 0) rawMs = 0;
       if (rawMs > totalMs) rawMs = totalMs;
 
@@ -560,7 +554,6 @@
       displayMs = norm.display;
 
       if (norm.eof && !isLoop) {
-        // Auto-reset and re-arm Play on BOTH forward EOF and reverse-to-zero.
         if (isPlayingUI) {
           isPlayingUI = false;
           ui.btnPlay.classList.remove("is-on");
@@ -578,9 +571,6 @@
       redrawWaveforms();
     }
 
-    // ----------------------------
-    // Render list
-    // ----------------------------
     function renderList() {
       ui.list.innerHTML = "";
       rowEls.length = 0;
@@ -698,18 +688,19 @@
       anchorRawMs = 0;
 
       didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
 
       await loadSelectedIntoRNBO();
       resetUIToStart();
     }
 
     // ----------------------------
-    // Transport semantics
+    // Transport
     // ----------------------------
     async function playFromBeginning() {
       await primeAudio();
 
-      // Reliable re-arm: stop first, reset our timebase, then play.
+      // Always re-arm: stop first, reset our timebase, then play.
       pulseParam(pStopTrig);
 
       portPlayheadMs = 0;
@@ -721,11 +712,36 @@
 
       didAutoResetAfterEOF = false;
 
+      // Reverse grace window: don't instantly treat raw=0 as EOF
+      reverseEOFIgnoreUntil =
+        getRateNow() < 0 ? performance.now() + REVERSE_EOF_GRACE_MS : 0;
+
       resetUIToStart();
 
       isPlayingUI = true;
       ui.btnPlay.classList.add("is-on");
       ui.statusText.innerText = "Playing";
+
+      // Reverse-start assist:
+      // If rate < 0 AND loop is currently OFF, briefly enable RNBO loop to allow wrap/start.
+      const rateNow = getRateNow();
+      if (rateNow < 0 && !isLoop) {
+        try {
+          pLoop.value = 1; // do NOT change UI button state
+          // Trigger play while loop is briefly enabled
+          pulseParam(pPlayTrig);
+
+          setTimeout(() => {
+            // restore loop OFF
+            try { pLoop.value = 0; } catch (_) {}
+          }, REVERSE_LOOP_ASSIST_MS);
+
+          return;
+        } catch (err) {
+          console.warn("Reverse loop-assist failed; falling back to normal play.", err);
+          // fall through
+        }
+      }
 
       pulseParam(pPlayTrig);
     }
@@ -745,6 +761,7 @@
       anchorRawMs = 0;
 
       didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
 
       resetUIToStart();
     }
@@ -758,20 +775,16 @@
     });
 
     ui.btnLoop.addEventListener("click", () => {
-      // Toggle loop without stopping playback or jumping.
       const wasLoop = isLoop;
       isLoop = !isLoop;
 
-      try {
-        pLoop.value = isLoop ? 1 : 0;
-      } catch (_) {}
-
+      try { pLoop.value = isLoop ? 1 : 0; } catch (_) {}
       ui.btnLoop.classList.toggle("is-on", isLoop);
 
+      // If turning LOOP OFF mid-play, rebase effective time to prevent jump-to-EOF.
       if (wasLoop && !isLoop) {
-        // Rebase effective time to preserve continuity (esp. with monotonic playhead).
         const nowPortRaw = portPlayheadMs;
-        const desiredEffective = displayMs; // keep where we are visually
+        const desiredEffective = displayMs;
         portOffsetMs = nowPortRaw - desiredEffective;
 
         anchorCtxTime = context.currentTime;
@@ -807,14 +820,8 @@
     });
 
     // ----------------------------
-    // Playhead input (RNBO outport) + fallback
+    // RNBO playhead outport + fallback
     // ----------------------------
-    function getEffectiveRaw() {
-      const effective = portPlayheadMs - portOffsetMs;
-      return Number.isFinite(effective) ? effective : 0;
-    }
-
-    // RNBO playhead messages (optional)
     if (device.messageEvent?.subscribe) {
       device.messageEvent.subscribe((ev) => {
         if (ev.tag !== "playhead") return;
@@ -856,9 +863,7 @@
       requestAnimationFrame(tick);
     }
 
-    // ----------------------------
     // Init render
-    // ----------------------------
     renderList();
     await setSelected(0);
     requestAnimationFrame(tick);
