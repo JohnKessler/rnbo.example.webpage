@@ -1,6 +1,11 @@
 // playlist-ui.js
-// RNBO Playlist UI — preload fade + rate + loop-aware progress/time/waveform cursor
-// With robust playhead: RNBO outport if available, else AudioContext-based fallback.
+// RNBO Playlist UI — restore stable core behavior + keep styled UI
+//
+// Behavior guarantees (what you asked for):
+// - Play ALWAYS starts from beginning (0:00), even after EOF or Stop.
+// - At EOF (loop OFF) UI auto-resets to 0:00 (does not hang at end).
+// - Loop toggle while playing does NOT stop, does NOT jump to end.
+// - If RNBO playhead is monotonic (keeps counting through loops), UI rebases it.
 //
 // Expected RNBO parameters (by id):
 //   clipIndex, rate, loop, playTrig, stopTrig, outGain
@@ -29,7 +34,10 @@
   const PRELOAD_FADE_DURATION_MS = 600;
 
   // End detection slack (ms)
-  const END_EPS_MS = 25;
+  const END_EPS_MS = 15;
+
+  // When playhead port is stale, we can optionally estimate from AudioContext time
+  const PORT_FRESH_MS = 120;
 
   // ----------------------------
   // Helpers
@@ -205,11 +213,9 @@
       createEl("div", { className: "rnbo-meta", innerText: "RNBO Web Export" }),
       createEl("div", { className: "rnbo-preload", innerText: "Preload: 0%" }),
     ]);
-
     const statusBadge = createEl("div", { className: "status-badge" }, [
       createEl("span", { className: "status-text", innerText: "Ready" }),
     ]);
-
     headerRowTitle.append(titleStack, statusBadge);
 
     // Transport row
@@ -230,10 +236,9 @@
       { className: "rnbo-btn rnbo-iconbtn rnbo-loop", type: "button", title: "Loop", ariaLabel: "Loop" },
       [iconSVG(ICON_LOOP)]
     );
-
     const transportLeft = createEl("div", { className: "transport-left" }, [btnPlay, btnStop, btnLoop]);
 
-    // Rate
+    // Rate group
     const rate = createEl("input", {
       className: "rnbo-slider rnbo-rate-slider",
       type: "range",
@@ -250,7 +255,7 @@
       rateVal,
     ]);
 
-    // Volume
+    // Volume group
     const vol = createEl("input", {
       className: "rnbo-slider rnbo-volume-slider",
       type: "range",
@@ -289,7 +294,6 @@
     ]);
 
     headerRowProgress.append(progressTrack, timeRow);
-
     top.append(headerRowTitle, headerRowTransport, headerRowProgress);
 
     // List
@@ -312,7 +316,6 @@
       volVal,
       preloadText: titleStack.querySelector(".rnbo-preload"),
       statusText: statusBadge.querySelector(".status-text"),
-      progressTrack,
       progressFill: progressTrack.querySelector(".progress-fill"),
       progressHandle: progressTrack.querySelector(".progress-handle"),
       timeElapsed: timeRow.querySelector(".time-elapsed"),
@@ -340,6 +343,7 @@
         if (context && context.state !== "running") await context.resume();
       } catch (_) {}
     }
+
     ["pointerdown", "click"].forEach((evt) => {
       ui.btnPlay.addEventListener(evt, primeAudio, { passive: true });
       ui.btnStop.addEventListener(evt, primeAudio, { passive: true });
@@ -361,8 +365,8 @@
           ? String((rateMax - rateMin) / (rateSteps - 1))
           : String((rateMax - rateMin) / 1000);
 
-      ui.rate.value = String(pRate.value);
-      ui.rateVal.innerText = `${Number(pRate.value).toFixed(2)}×`;
+      ui.rate.value = String(pRate.value ?? 1);
+      ui.rateVal.innerText = `${Number(ui.rate.value).toFixed(2)}×`;
 
       ui.rate.addEventListener("input", () => {
         const v = Number(ui.rate.value);
@@ -386,7 +390,7 @@
 
       const initialOut = Number.isFinite(pOutGain.value)
         ? pOutGain.value
-        : (outMin + outMax) * 0.6;
+        : (outMin + outMax) * 0.75;
 
       ui.vol.value = String(initialOut);
       ui.volVal.innerText = String(Math.round(initialOut * 1000) / 1000);
@@ -398,7 +402,7 @@
       });
     }
 
-    // Progress/time helpers
+    // UI helpers
     function setProgress(frac01) {
       const f = clamp01(frac01);
       ui.progressFill.style.width = `${f * 100}%`;
@@ -443,35 +447,34 @@
     setTimeout(() => ui.preloadText.classList.add("is-fading"), PRELOAD_FADE_DELAY_MS);
 
     // ----------------------------
-    // State
+    // State (this is where the old “good behavior” lives)
     // ----------------------------
     let selectedIdx = 0;
     let isLoop = false;
 
-    // UI play state (for the fallback clock + finish behavior)
+    // “UI playing” flag (used for play semantics + fallback ticking)
     let isPlayingUI = false;
 
-    // Raw playhead (ms) from RNBO if available
-    let playheadMsRaw = 0;
+    // RNBO playhead raw (monotonic in your patch)
+    let portPlayheadMs = 0;
+    let lastPortAt = 0;
 
-    // When relying on fallback clock:
-    // anchor raw ms at a given AudioContext time, then advance by elapsed * rate
+    // A rebase offset applied to port playhead so UI behaves on loop toggles
+    // effectiveRaw = portPlayheadMs - portOffsetMs
+    let portOffsetMs = 0;
+
+    // Fallback anchor (if port stalls)
     let anchorCtxTime = 0;
     let anchorRawMs = 0;
 
-    // Track whether RNBO playhead outport is “alive”
-    let lastPortUpdateAt = 0;
+    // Displayed playhead (after loop wrap / clamp)
+    let displayMs = 0;
 
-    // Display playhead after loop/end normalization
-    let playheadMsDisplay = 0;
-
-    // Prevent spamming stop on finish
-    let stopSentOnFinish = false;
-
-    let lastUiPaintAt = 0;
+    // Finish/EOF bookkeeping
+    let didAutoResetAfterEOF = false;
 
     // ----------------------------
-    // Rows
+    // Playlist rows
     // ----------------------------
     const rowEls = [];
 
@@ -491,7 +494,7 @@
         const active = idx === selectedIdx;
         const frac =
           active && it.durationMs > 0
-            ? clamp01(playheadMsDisplay / it.durationMs)
+            ? clamp01(displayMs / it.durationMs)
             : null;
         drawWaveform(canvas, it.peaks, frac);
       });
@@ -500,44 +503,67 @@
     async function loadSelectedIntoRNBO() {
       const it = items[selectedIdx];
       if (!it) return;
-
-      try {
-        await primeAudio();
-        await device.setDataBuffer("sample", it.audioBuffer);
-        pClipIndex.value = selectedIdx;
-      } catch (err) {
-        console.error("Failed to set RNBO buffer:", err);
-        ui.statusText.innerText = "Buffer load failed";
-      }
+      await device.setDataBuffer("sample", it.audioBuffer);
+      pClipIndex.value = selectedIdx;
     }
 
-    function resetPlayheadUI() {
-      playheadMsRaw = 0;
-      playheadMsDisplay = 0;
-
-      anchorCtxTime = context.currentTime;
-      anchorRawMs = 0;
-
-      lastPortUpdateAt = 0;
-      stopSentOnFinish = false;
-
+    function resetUIToStart() {
+      displayMs = 0;
       setProgress(0);
       setTime(0, items[selectedIdx]?.durationMs || 0);
       redrawWaveforms();
+      didAutoResetAfterEOF = true;
     }
 
-    function setSelected(idx) {
-      selectedIdx = Math.max(0, Math.min(items.length - 1, idx));
-      applyRowActiveClasses();
-      loadSelectedIntoRNBO();
+    function normalizeForDisplay(rawMs, totalMs) {
+      if (!Number.isFinite(rawMs) || !Number.isFinite(totalMs) || totalMs <= 0) {
+        return { display: 0, eof: false };
+      }
 
-      isPlayingUI = false;
-      ui.btnPlay.classList.remove("is-on");
-      ui.statusText.innerText = "Ready";
+      if (isLoop) {
+        const mod = rawMs % totalMs;
+        const d = mod < 0 ? mod + totalMs : mod;
+        return { display: d, eof: false };
+      }
 
-      resetPlayheadUI();
+      if (rawMs >= totalMs - END_EPS_MS) {
+        return { display: totalMs, eof: true };
+      }
+
+      return { display: rawMs, eof: false };
     }
 
+    function paintFromRaw(rawMs) {
+      const it = items[selectedIdx];
+      if (!it) return;
+
+      const norm = normalizeForDisplay(rawMs, it.durationMs);
+      displayMs = norm.display;
+
+      // EOF handling (loop OFF):
+      // Instead of hanging at the end, auto-reset to 0:00.
+      if (norm.eof && !isLoop) {
+        if (isPlayingUI) {
+          isPlayingUI = false;
+          ui.btnPlay.classList.remove("is-on");
+          ui.statusText.innerText = "Ready";
+        }
+
+        // Send stop once to keep device sane, then reset UI to 0
+        pulseParam(pStopTrig);
+        resetUIToStart();
+        return;
+      }
+
+      const frac = it.durationMs > 0 ? clamp01(displayMs / it.durationMs) : 0;
+      setProgress(frac);
+      setTime(displayMs, it.durationMs);
+      redrawWaveforms();
+    }
+
+    // ----------------------------
+    // Render list
+    // ----------------------------
     function renderList() {
       ui.list.innerHTML = "";
       rowEls.length = 0;
@@ -629,7 +655,10 @@
 
           renderList();
           applyRowActiveClasses();
-          loadSelectedIntoRNBO();
+          loadSelectedIntoRNBO().catch(console.error);
+
+          // Re-sync UI after reorder
+          resetUIToStart();
         });
 
         ui.list.appendChild(row);
@@ -639,111 +668,109 @@
       applyRowActiveClasses();
     }
 
-    // ----------------------------
-    // Loop / end normalization for UI
-    // ----------------------------
-    function normalizePlayheadForUI(rawMs, totalMs) {
-      if (!Number.isFinite(rawMs) || !Number.isFinite(totalMs) || totalMs <= 0) {
-        return { displayMs: 0, finished: false };
-      }
+    async function setSelected(idx) {
+      selectedIdx = Math.max(0, Math.min(items.length - 1, idx));
+      applyRowActiveClasses();
 
-      if (isLoop) {
-        const mod = rawMs % totalMs;
-        const d = mod < 0 ? mod + totalMs : mod;
-        return { displayMs: d, finished: false };
-      }
+      // Selection should not require stop to be playable again.
+      isPlayingUI = false;
+      ui.btnPlay.classList.remove("is-on");
+      ui.statusText.innerText = "Ready";
 
-      if (rawMs >= totalMs - END_EPS_MS) {
-        return { displayMs: totalMs, finished: true };
-      }
-
-      return { displayMs: rawMs, finished: false };
-    }
-
-    function paintUI() {
-      const it = items[selectedIdx];
-      if (!it) return;
-
-      const norm = normalizePlayheadForUI(playheadMsRaw, it.durationMs);
-      playheadMsDisplay = norm.displayMs;
-
-      const frac = it.durationMs > 0 ? clamp01(playheadMsDisplay / it.durationMs) : 0;
-      setProgress(frac);
-
-      if (norm.finished) {
-        // Freeze display at end
-        setTime(it.durationMs, it.durationMs);
-        redrawWaveforms();
-
-        if (isPlayingUI) {
-          isPlayingUI = false;
-          ui.btnPlay.classList.remove("is-on");
-          ui.statusText.innerText = "Finished";
-        }
-
-        // Stop audio once (optional but prevents “phantom running” patches)
-        if (!stopSentOnFinish) {
-          stopSentOnFinish = true;
-          try { pulseParam(pStopTrig); } catch (_) {}
-        }
-        return;
-      }
-
-      setTime(playheadMsDisplay, it.durationMs);
-      redrawWaveforms();
-    }
-
-    // ----------------------------
-    // Transport actions
-    // ----------------------------
-    async function doPlay() {
-      await primeAudio();
-      await loadSelectedIntoRNBO();
-
-      ui.statusText.innerText = "Playing";
-      ui.btnPlay.classList.add("is-on");
-      isPlayingUI = true;
-
-      stopSentOnFinish = false;
-
-      // Reset anchor for fallback clock
+      // Reset all timing/bookkeeping
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
       anchorCtxTime = context.currentTime;
-      anchorRawMs = playheadMsRaw;
+      anchorRawMs = 0;
+      didAutoResetAfterEOF = false;
+
+      await loadSelectedIntoRNBO();
+      resetUIToStart();
+    }
+
+    // ----------------------------
+    // Transport semantics (the important part)
+    // ----------------------------
+    async function playFromBeginning() {
+      await primeAudio();
+
+      // Always start from 0:00 no matter what happened before.
+      // Stop first (cheap + reliable) then play.
+      pulseParam(pStopTrig);
+
+      // Reset our timeline right now
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
+      didAutoResetAfterEOF = false;
+
+      // UI immediately shows 0:00
+      resetUIToStart();
+
+      // Trigger play
+      isPlayingUI = true;
+      ui.btnPlay.classList.add("is-on");
+      ui.statusText.innerText = "Playing";
 
       pulseParam(pPlayTrig);
     }
 
-    async function doStop() {
-      await primeAudio();
-
-      ui.statusText.innerText = "Stopped";
-      ui.btnPlay.classList.remove("is-on");
-      isPlayingUI = false;
-
+    function stopNow() {
       pulseParam(pStopTrig);
 
-      resetPlayheadUI();
+      isPlayingUI = false;
+      ui.btnPlay.classList.remove("is-on");
+      ui.statusText.innerText = "Ready";
+
+      // Reset UI/timing to start
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
+      didAutoResetAfterEOF = false;
+
+      resetUIToStart();
     }
 
-    ui.btnPlay.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      doPlay();
+    ui.btnPlay.addEventListener("click", () => {
+      playFromBeginning().catch(console.error);
     });
 
-    ui.btnStop.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      doStop();
+    ui.btnStop.addEventListener("click", () => {
+      stopNow();
     });
 
-    ui.btnLoop.addEventListener("click", (ev) => {
-      ev.preventDefault();
-
+    ui.btnLoop.addEventListener("click", () => {
+      // Toggle loop without stopping playback or jumping.
+      const wasLoop = isLoop;
       isLoop = !isLoop;
+
       try { pLoop.value = isLoop ? 1 : 0; } catch (_) {}
       ui.btnLoop.classList.toggle("is-on", isLoop);
 
-      // Repaint immediately to wrap/un-wrap properly
-      paintUI();
+      // If we are turning LOOP OFF while RNBO playhead is monotonic,
+      // we must "rebase" the effective raw time so UI doesn't instantly jump to EOF.
+      if (wasLoop && !isLoop) {
+        // current displayMs is the modulo position; keep continuity by making that the new raw origin.
+        const nowPortRaw = portPlayheadMs;
+        const desiredEffective = displayMs; // keep where we are
+        portOffsetMs = nowPortRaw - desiredEffective;
+
+        // also reset fallback anchor from "now"
+        anchorCtxTime = context.currentTime;
+        anchorRawMs = desiredEffective;
+
+        // And repaint immediately
+        paintFromRaw(desiredEffective);
+        return;
+      }
+
+      // Turning LOOP ON can use modulo display; just repaint
+      paintFromRaw(getEffectiveRaw());
     });
 
     // Keyboard shortcuts
@@ -752,16 +779,16 @@
 
       if (ev.key === "ArrowDown") {
         ev.preventDefault();
-        setSelected(selectedIdx + 1);
+        setSelected(selectedIdx + 1).catch(console.error);
       } else if (ev.key === "ArrowUp") {
         ev.preventDefault();
-        setSelected(selectedIdx - 1);
+        setSelected(selectedIdx - 1).catch(console.error);
       } else if (ev.key === " " || ev.code === "Space") {
         ev.preventDefault();
-        doPlay();
-      } else if (ev.key.toLowerCase() === "s") {
+        playFromBeginning().catch(console.error);
+      } else if (ev.key.toLowerCase() === "s" || ev.key === "Escape") {
         ev.preventDefault();
-        doStop();
+        stopNow();
       } else if (ev.key.toLowerCase() === "l") {
         ev.preventDefault();
         ui.btnLoop.click();
@@ -769,66 +796,72 @@
     });
 
     // ----------------------------
-    // RNBO playhead messages (if available)
+    // Playhead input (RNBO outport) + fallback
     // ----------------------------
+    function getEffectiveRaw() {
+      // effective raw is monotonic port time minus our offset
+      const effective = portPlayheadMs - portOffsetMs;
+      return Number.isFinite(effective) ? effective : 0;
+    }
+
+    // RNBO playhead messages (optional)
     if (device.messageEvent?.subscribe) {
       device.messageEvent.subscribe((ev) => {
         if (ev.tag !== "playhead") return;
-
         const payload = ev.payload || [];
         const v = Number(payload[0]);
         if (!Number.isFinite(v)) return;
 
-        playheadMsRaw = v;
+        portPlayheadMs = v;
+        lastPortAt = performance.now();
 
-        // Sync fallback anchor to this “known true” playhead
+        // Keep fallback anchor synced to effective time so it can take over smoothly if port stalls
         anchorCtxTime = context.currentTime;
-        anchorRawMs = playheadMsRaw;
-
-        lastPortUpdateAt = performance.now();
+        anchorRawMs = getEffectiveRaw();
       });
     }
 
-    // ----------------------------
-    // Fallback + paint loop (always runs)
-    // ----------------------------
+    // UI tick loop
+    let lastPaintAt = 0;
+
     function tick() {
       const now = performance.now();
 
-      // If we're “playing”, advance playhead using fallback clock,
-      // unless RNBO outport has updated very recently.
+      // If playing and port is stale, estimate raw time from AudioContext.
       if (isPlayingUI) {
-        const portFresh = (now - lastPortUpdateAt) < 120;
+        const portFresh = (now - lastPortAt) < PORT_FRESH_MS;
 
         if (!portFresh) {
           const elapsedSec = Math.max(0, context.currentTime - anchorCtxTime);
           const rateNow = Number(pRate.value) || 1;
-          playheadMsRaw = anchorRawMs + elapsedSec * 1000 * rateNow;
+          const estRaw = anchorRawMs + elapsedSec * 1000 * rateNow;
+
+          // When estimating, we pretend it’s the “effective raw”
+          // (so it continues smoothly after a loop toggle rebase)
+          paintFromRaw(estRaw);
+        } else {
+          paintFromRaw(getEffectiveRaw());
+        }
+      } else {
+        // Not playing: keep UI at start (especially after EOF auto-reset)
+        if (!didAutoResetAfterEOF) {
+          paintFromRaw(0);
         }
       }
 
-      // Paint UI at a controlled rate
-      if (now - lastUiPaintAt >= UI_THROTTLE_MS) {
-        lastUiPaintAt = now;
-        paintUI();
+      if (now - lastPaintAt >= UI_THROTTLE_MS) {
+        lastPaintAt = now;
       }
 
       requestAnimationFrame(tick);
     }
-    requestAnimationFrame(tick);
 
     // ----------------------------
-    // Initial render
+    // Init render
     // ----------------------------
     renderList();
-    setSelected(0);
-    loadSelectedIntoRNBO();
-
-    const it0 = items[0];
-    if (it0) {
-      setTime(0, it0.durationMs);
-      setProgress(0);
-    }
+    await setSelected(0);
+    requestAnimationFrame(tick);
   }
 
   window.initPlaylistUI = initPlaylistUI;
