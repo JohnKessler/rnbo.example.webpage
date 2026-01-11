@@ -1,9 +1,10 @@
 // playlist-ui.js
 // RNBO Playlist UI — restore stable core behavior + keep styled UI
 //
-// Behavior guarantees (what you asked for):
+// Behavior guarantees:
 // - Play ALWAYS starts from beginning (0:00), even after EOF or Stop.
 // - At EOF (loop OFF) UI auto-resets to 0:00 (does not hang at end).
+// - Reverse playback (rate < 0): when playhead reaches 0, it resets + re-arms Play.
 // - Loop toggle while playing does NOT stop, does NOT jump to end.
 // - If RNBO playhead is monotonic (keeps counting through loops), UI rebases it.
 //
@@ -69,7 +70,9 @@
 
   function pulseParam(param, ms = 20) {
     param.value = 1;
-    setTimeout(() => { param.value = 0; }, ms);
+    setTimeout(() => {
+      param.value = 0;
+    }, ms);
   }
 
   async function fetchJSON(url) {
@@ -85,7 +88,9 @@
   }
 
   function saveOrder(names) {
-    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+    } catch (_) {}
   }
 
   function loadOrder() {
@@ -151,7 +156,8 @@
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1, max = -1;
+      let min = 1,
+        max = -1;
       const start = x * spp;
       const end = Math.min(len, (x + 1) * spp);
       for (let i = start; i < end; i++) {
@@ -242,7 +248,7 @@
     const rate = createEl("input", {
       className: "rnbo-slider rnbo-rate-slider",
       type: "range",
-      min: 0.25,
+      min: -2,
       max: 2,
       step: 0.01,
       value: 1,
@@ -354,8 +360,8 @@
 
     // Bind RATE (auto range)
     {
-      const rateMin = Number.isFinite(pRate.min) ? pRate.min : 0.25;
-      const rateMax = Number.isFinite(pRate.max) ? pRate.max : 2.0;
+      const rateMin = Number.isFinite(pRate.min) ? pRate.min : -2;
+      const rateMax = Number.isFinite(pRate.max) ? pRate.max : 2;
       const rateSteps = Number.isFinite(pRate.steps) ? pRate.steps : 0;
 
       ui.rate.min = String(rateMin);
@@ -447,7 +453,7 @@
     setTimeout(() => ui.preloadText.classList.add("is-fading"), PRELOAD_FADE_DELAY_MS);
 
     // ----------------------------
-    // State (this is where the old “good behavior” lives)
+    // State
     // ----------------------------
     let selectedIdx = 0;
     let isLoop = false;
@@ -455,12 +461,11 @@
     // “UI playing” flag (used for play semantics + fallback ticking)
     let isPlayingUI = false;
 
-    // RNBO playhead raw (monotonic in your patch)
+    // RNBO playhead raw (can be monotonic)
     let portPlayheadMs = 0;
     let lastPortAt = 0;
 
-    // A rebase offset applied to port playhead so UI behaves on loop toggles
-    // effectiveRaw = portPlayheadMs - portOffsetMs
+    // A rebase offset applied to port playhead
     let portOffsetMs = 0;
 
     // Fallback anchor (if port stalls)
@@ -470,7 +475,7 @@
     // Displayed playhead (after loop wrap / clamp)
     let displayMs = 0;
 
-    // Finish/EOF bookkeeping
+    // Prevent repainting to start constantly when idle
     let didAutoResetAfterEOF = false;
 
     // ----------------------------
@@ -493,9 +498,7 @@
         const it = items[idx];
         const active = idx === selectedIdx;
         const frac =
-          active && it.durationMs > 0
-            ? clamp01(displayMs / it.durationMs)
-            : null;
+          active && it.durationMs > 0 ? clamp01(displayMs / it.durationMs) : null;
         drawWaveform(canvas, it.peaks, frac);
       });
     }
@@ -515,6 +518,11 @@
       didAutoResetAfterEOF = true;
     }
 
+    function getRateNow() {
+      const r = Number(pRate.value);
+      return Number.isFinite(r) ? r : 1;
+    }
+
     function normalizeForDisplay(rawMs, totalMs) {
       if (!Number.isFinite(rawMs) || !Number.isFinite(totalMs) || totalMs <= 0) {
         return { display: 0, eof: false };
@@ -526,9 +534,20 @@
         return { display: d, eof: false };
       }
 
-      if (rawMs >= totalMs - END_EPS_MS) {
-        return { display: totalMs, eof: true };
+      // Loop OFF:
+      // Forward: EOF at >= duration
+      // Reverse: EOF at <= 0
+      const rateNow = getRateNow();
+
+      if (rateNow < 0) {
+        if (rawMs <= END_EPS_MS) return { display: 0, eof: true };
+      } else {
+        if (rawMs >= totalMs - END_EPS_MS) return { display: totalMs, eof: true };
       }
+
+      // Clamp display inside bounds for sanity
+      if (rawMs < 0) rawMs = 0;
+      if (rawMs > totalMs) rawMs = totalMs;
 
       return { display: rawMs, eof: false };
     }
@@ -540,16 +559,14 @@
       const norm = normalizeForDisplay(rawMs, it.durationMs);
       displayMs = norm.display;
 
-      // EOF handling (loop OFF):
-      // Instead of hanging at the end, auto-reset to 0:00.
       if (norm.eof && !isLoop) {
+        // Auto-reset and re-arm Play on BOTH forward EOF and reverse-to-zero.
         if (isPlayingUI) {
           isPlayingUI = false;
           ui.btnPlay.classList.remove("is-on");
           ui.statusText.innerText = "Ready";
         }
 
-        // Send stop once to keep device sane, then reset UI to 0
         pulseParam(pStopTrig);
         resetUIToStart();
         return;
@@ -601,7 +618,6 @@
         }, [header, waveformWrap]);
 
         drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null);
-
         row.addEventListener("click", () => setSelected(idx));
 
         // Drag reorder (arm drag only from handle)
@@ -656,8 +672,6 @@
           renderList();
           applyRowActiveClasses();
           loadSelectedIntoRNBO().catch(console.error);
-
-          // Re-sync UI after reorder
           resetUIToStart();
         });
 
@@ -672,17 +686,17 @@
       selectedIdx = Math.max(0, Math.min(items.length - 1, idx));
       applyRowActiveClasses();
 
-      // Selection should not require stop to be playable again.
       isPlayingUI = false;
       ui.btnPlay.classList.remove("is-on");
       ui.statusText.innerText = "Ready";
 
-      // Reset all timing/bookkeeping
       portPlayheadMs = 0;
       lastPortAt = 0;
       portOffsetMs = 0;
+
       anchorCtxTime = context.currentTime;
       anchorRawMs = 0;
+
       didAutoResetAfterEOF = false;
 
       await loadSelectedIntoRNBO();
@@ -690,27 +704,25 @@
     }
 
     // ----------------------------
-    // Transport semantics (the important part)
+    // Transport semantics
     // ----------------------------
     async function playFromBeginning() {
       await primeAudio();
 
-      // Always start from 0:00 no matter what happened before.
-      // Stop first (cheap + reliable) then play.
+      // Reliable re-arm: stop first, reset our timebase, then play.
       pulseParam(pStopTrig);
 
-      // Reset our timeline right now
       portPlayheadMs = 0;
       lastPortAt = 0;
       portOffsetMs = 0;
+
       anchorCtxTime = context.currentTime;
       anchorRawMs = 0;
+
       didAutoResetAfterEOF = false;
 
-      // UI immediately shows 0:00
       resetUIToStart();
 
-      // Trigger play
       isPlayingUI = true;
       ui.btnPlay.classList.add("is-on");
       ui.statusText.innerText = "Playing";
@@ -725,12 +737,13 @@
       ui.btnPlay.classList.remove("is-on");
       ui.statusText.innerText = "Ready";
 
-      // Reset UI/timing to start
       portPlayheadMs = 0;
       lastPortAt = 0;
       portOffsetMs = 0;
+
       anchorCtxTime = context.currentTime;
       anchorRawMs = 0;
+
       didAutoResetAfterEOF = false;
 
       resetUIToStart();
@@ -749,27 +762,25 @@
       const wasLoop = isLoop;
       isLoop = !isLoop;
 
-      try { pLoop.value = isLoop ? 1 : 0; } catch (_) {}
+      try {
+        pLoop.value = isLoop ? 1 : 0;
+      } catch (_) {}
+
       ui.btnLoop.classList.toggle("is-on", isLoop);
 
-      // If we are turning LOOP OFF while RNBO playhead is monotonic,
-      // we must "rebase" the effective raw time so UI doesn't instantly jump to EOF.
       if (wasLoop && !isLoop) {
-        // current displayMs is the modulo position; keep continuity by making that the new raw origin.
+        // Rebase effective time to preserve continuity (esp. with monotonic playhead).
         const nowPortRaw = portPlayheadMs;
-        const desiredEffective = displayMs; // keep where we are
+        const desiredEffective = displayMs; // keep where we are visually
         portOffsetMs = nowPortRaw - desiredEffective;
 
-        // also reset fallback anchor from "now"
         anchorCtxTime = context.currentTime;
         anchorRawMs = desiredEffective;
 
-        // And repaint immediately
         paintFromRaw(desiredEffective);
         return;
       }
 
-      // Turning LOOP ON can use modulo display; just repaint
       paintFromRaw(getEffectiveRaw());
     });
 
@@ -799,7 +810,6 @@
     // Playhead input (RNBO outport) + fallback
     // ----------------------------
     function getEffectiveRaw() {
-      // effective raw is monotonic port time minus our offset
       const effective = portPlayheadMs - portOffsetMs;
       return Number.isFinite(effective) ? effective : 0;
     }
@@ -815,7 +825,7 @@
         portPlayheadMs = v;
         lastPortAt = performance.now();
 
-        // Keep fallback anchor synced to effective time so it can take over smoothly if port stalls
+        // Sync fallback anchor to effective time
         anchorCtxTime = context.currentTime;
         anchorRawMs = getEffectiveRaw();
       });
@@ -827,32 +837,22 @@
     function tick() {
       const now = performance.now();
 
-      // If playing and port is stale, estimate raw time from AudioContext.
       if (isPlayingUI) {
-        const portFresh = (now - lastPortAt) < PORT_FRESH_MS;
+        const portFresh = now - lastPortAt < PORT_FRESH_MS;
 
         if (!portFresh) {
           const elapsedSec = Math.max(0, context.currentTime - anchorCtxTime);
-          const rateNow = Number(pRate.value) || 1;
+          const rateNow = getRateNow() || 1;
           const estRaw = anchorRawMs + elapsedSec * 1000 * rateNow;
-
-          // When estimating, we pretend it’s the “effective raw”
-          // (so it continues smoothly after a loop toggle rebase)
           paintFromRaw(estRaw);
         } else {
           paintFromRaw(getEffectiveRaw());
         }
       } else {
-        // Not playing: keep UI at start (especially after EOF auto-reset)
-        if (!didAutoResetAfterEOF) {
-          paintFromRaw(0);
-        }
+        if (!didAutoResetAfterEOF) paintFromRaw(0);
       }
 
-      if (now - lastPaintAt >= UI_THROTTLE_MS) {
-        lastPaintAt = now;
-      }
-
+      if (now - lastPaintAt >= UI_THROTTLE_MS) lastPaintAt = now;
       requestAnimationFrame(tick);
     }
 
