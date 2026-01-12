@@ -1,254 +1,203 @@
 // playlist-ui.js
-// RNBO Playlist UI (Web Export) — Refactored for direct reference CSS + robust reverse playback
+// RNBO Playlist UI — external buffer–driven (sample) + reliable reverse loop
+// 2026-01-11 — authoritative RNBO Web Audio version
 
 (function () {
-    "use strict";
+  "use strict";
 
-    // ----------------------------
-    // Config & Utility
-    // ----------------------------
-    const LOOP = 1, NO_LOOP = 0;
-    let device, context;
-    let clips = []; // Assume playlist gets loaded elsewhere
+  const MEDIA_BASE = "export/media/";
+  const PLAYLIST_JSON = MEDIA_BASE + "playlist.json";
+  const BUFFER_ID = "sample";
 
-    // Helper to clamp a value
-    function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
+  let device, context;
 
-    // ----------------------------
-    // Reference Classes (from your CSS)
-    // ----------------------------
-    const HEADER_CLASS = "header-tran-5d451590b627";
-    const HEADER_BTN_GROUP = "header-tran-btnrow-5d451590b627";
-    const BTN_ICON = "header-tran-iconbtn-5d451590b627";
-    const BTN_ICON_CIRCLE = "header-tran-iconbtncirc-5d451590b627";
-    const TRANSPORT_BTN = "header-tran-btn-5d451590b627";
-    const TIME_ROW = "header-tran-timerow-5d451590b627";
-    const PROGRESS_ROW = "header-tran-progressrow-5d451590b627";
-    const PROGRESS = "header-tran-progress-5d451590b627";
+  let items = []; // { filename, audioBuffer, durationMs }
+  let currentIndex = -1;
 
-    const PLAYLIST_CONTAINER = "playlist-it-5d3648fdeb2a";
-    const PLAYLIST_ROW = "playlist-it-row-5d3648fdeb2a";
-    const PLAYLIST_INDEX = "playlist-it-index-5d3648fdeb2a";
-    const PLAYLIST_WAVEFORM = "playlist-it-waveform-5d3648fdeb2a";
-    const PLAYLIST_META = "playlist-it-meta-5d3648fdeb2a";
-    const PLAYLIST_TITLE = "playlist-it-title-5d3648fdeb2a";
+  let isPlaying = false;
+  let isLoop = false;
 
-    // ----------------------------
-    // Main UI Initialization
-    // ----------------------------
-    window.initPlaylistUI = function (rnboDevice, rnboContext) {
-        device = rnboDevice;
-        context = rnboContext;
+  let rate = 1;
 
-        // Render Header/Transport UI
-        renderHeaderTransport();
+  // ----------------------------
+  // Utilities
+  // ----------------------------
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
-        // Render Playlist Items
-        renderPlaylist();
+  const msToTime = (ms) => {
+    ms = Math.max(0, Math.floor(ms));
+    const s = Math.floor(ms / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
 
-        // Bind control events (rate, play, stop, loop, volume, etc.)
-        setupTransportEvents();
-    };
+  async function fetchJSON(url) {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`Failed to fetch ${url}`);
+    return r.json();
+  }
 
-    // ----------------------------
-    // Header Transport (Reference CSS)
-    // ----------------------------
-    function renderHeaderTransport() {
-        const content = document.getElementById('rnbo-content');
-        if (!content) return;
+  async function fetchAndDecode(url) {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`Failed to fetch audio ${url}`);
+    const ab = await r.arrayBuffer();
+    return context.decodeAudioData(ab);
+  }
 
-        // Build header/transport bar with reference CSS classes
-        content.innerHTML = `
-        <div class="${HEADER_CLASS}">
-            <div class="${HEADER_BTN_GROUP}">
-                <button id="play-btn" class="${BTN_ICON} ${BTN_ICON_CIRCLE}">
-                    <span class="material-icons">play_arrow</span>
-                </button>
-                <button id="stop-btn" class="${BTN_ICON} ${BTN_ICON_CIRCLE}">
-                    <span class="material-icons">stop</span>
-                </button>
-                <button id="loop-btn" class="${BTN_ICON} ${BTN_ICON_CIRCLE}">
-                    <span class="material-icons">repeat</span>
-                </button>
-            </div>
-            <div class="${TIME_ROW}">
-                <span id="transport-current">00:00.0</span>
-                <span>/</span>
-                <span id="transport-total">00:00.0</span>
-            </div>
-            <div class="${PROGRESS_ROW}">
-                <input id="transport-progress" class="${PROGRESS}" type="range" min="0" max="100" value="0" step="0.1">
-            </div>
-            <div class="header-tran-paramrow-5d451590b627">
-                <label>Rate
-                    <input id="rate-slider" type="range" min="-1" max="2" value="1" step="0.01">
-                </label>
-                <label>Gain
-                    <input id="gain-slider" type="range" min="0" max="158" value="120" step="1">
-                </label>
-            </div>
+  // ----------------------------
+  // RNBO helpers
+  // ----------------------------
+  function param(id) {
+    const p =
+      device.parametersById?.get(id) ||
+      device.parameters?.find((pp) => pp.id === id);
+    if (!p) throw new Error(`Missing RNBO param "${id}"`);
+    return p;
+  }
+
+  function pulse(p) {
+    p.value = 1;
+    setTimeout(() => (p.value = 0), 20);
+  }
+
+  async function loadIntoRNBO(audioBuffer) {
+    await device.setExternalData(BUFFER_ID, audioBuffer);
+  }
+
+  // ----------------------------
+  // UI build (minimal, style via reference CSS)
+  // ----------------------------
+  function buildUI() {
+    const root = document.getElementById("playlist-ui");
+    if (!root) throw new Error("Missing #playlist-ui");
+
+    root.innerHTML = `
+      <div class="header-tran-5d451590b627">
+        <div class="headerrow-5d4f68010508">
+          <button id="play">▶</button>
+          <button id="stop">■</button>
+          <button id="loop">⟲</button>
         </div>
-        <div class="${PLAYLIST_CONTAINER}" id="playlist-container"></div>
-        `;
-    }
 
-    // ----------------------------
-    // Playlist Items (Reference CSS)
-    // ----------------------------
-    function renderPlaylist() {
-        const container = document.getElementById('playlist-container');
-        if (!container) return;
+        <div class="timerow-5d5b2679cb48">
+          <span id="elapsed">0:00</span>
+          <span id="remaining">-0:00</span>
+        </div>
 
-        // For demo, make 4 fake clips
-        if (!clips.length) {
-            clips = [
-                { title: "Clip 1", duration: 30000 },
-                { title: "Clip 2", duration: 25000 },
-                { title: "Clip 3", duration: 37000 },
-                { title: "Clip 4", duration: 18000 }
-            ];
-        }
+        <input id="rate" type="range" min="-1" max="2" step="0.01" value="1">
+      </div>
 
-        // Render all clips
-        container.innerHTML = clips.map((clip, i) => `
-            <div class="${PLAYLIST_ROW}" data-index="${i}">
-                <div class="${PLAYLIST_INDEX}">${i + 1}</div>
-                <div class="${PLAYLIST_WAVEFORM}">[Waveform]</div>
-                <div class="${PLAYLIST_META}">
-                    <span class="${PLAYLIST_TITLE}">${clip.title}</span>
-                    <span>${msToTime(clip.duration)}</span>
-                </div>
-            </div>
-        `).join('');
-    }
+      <div id="list"></div>
+    `;
 
-    // ----------------------------
-    // Transport Control/Playback Logic
-    // ----------------------------
-    let isPlaying = false;
-    let currentClip = 0;
-    let loopMode = NO_LOOP;
-    let rate = 1;
-    let playbackTimer = null;
+    return {
+      play: root.querySelector("#play"),
+      stop: root.querySelector("#stop"),
+      loop: root.querySelector("#loop"),
+      rate: root.querySelector("#rate"),
+      elapsed: root.querySelector("#elapsed"),
+      remaining: root.querySelector("#remaining"),
+      list: root.querySelector("#list"),
+    };
+  }
 
-    function setupTransportEvents() {
-        // Play button
-        document.getElementById('play-btn').onclick = () => playClip();
-        // Stop button
-        document.getElementById('stop-btn').onclick = () => stopClip();
-        // Loop button
-        document.getElementById('loop-btn').onclick = () => {
-            loopMode = (loopMode === NO_LOOP) ? LOOP : NO_LOOP;
-            device.parametersById.loop.value = loopMode;
-        };
-        // Rate slider
-        document.getElementById('rate-slider').oninput = e => {
-            rate = parseFloat(e.target.value);
-            device.parametersById.rate.value = rate;
-            // If negative rate and playing, instantly jump playhead to end of loop/clip
-            if (isPlaying && rate < 0) {
-                seekPlayheadToClipEdge('end');
-            }
-        };
-        // Gain slider
-        document.getElementById('gain-slider').oninput = e => {
-            device.parametersById.outGain.value = parseFloat(e.target.value);
-        };
+  // ----------------------------
+  // Playback control
+  // ----------------------------
+  async function selectIndex(i) {
+    if (!items[i]) return;
 
-        // Click playlist row to select and play
-        document.querySelectorAll(`.${PLAYLIST_ROW}`).forEach(row => {
-            row.onclick = () => {
-                currentClip = parseInt(row.dataset.index, 10);
-                playClip();
-            };
-        });
-    }
+    currentIndex = i;
+    const it = items[i];
 
-    function playClip() {
-        const clip = clips[currentClip];
-        if (!clip) return;
+    await loadIntoRNBO(it.audioBuffer);
 
-        // Always jump playhead to start for fwd, end for reverse before play
-        if (rate >= 0) {
-            seekPlayheadToClipEdge('start');
-        } else {
-            seekPlayheadToClipEdge('end');
-        }
+    // Always reset playhead on load
+    const jump = param("jumpto");
+    jump.value = rate < 0 ? it.durationMs - 1 : 0;
+  }
 
-        // Actually trigger play
-        device.parametersById.clipIndex.value = currentClip;
-        device.parametersById.playTrig.value = 1;
-        isPlaying = true;
+  function play() {
+    if (currentIndex < 0) return;
 
-        // Start UI/playhead timer
-        startPlaybackTimer();
-    }
+    const it = items[currentIndex];
+    const jump = param("jumpto");
 
-    function stopClip() {
-        device.parametersById.stopTrig.value = 1;
-        isPlaying = false;
-        stopPlaybackTimer();
-    }
+    // CRITICAL: reverse must start at END
+    if (rate < 0) jump.value = it.durationMs - 1;
+    else jump.value = 0;
 
-    function seekPlayheadToClipEdge(edge) {
-        const clip = clips[currentClip];
-        if (!clip) return;
-        let ms = (edge === 'start') ? 0 : clip.duration;
-        device.parametersById.jumpto.value = clamp(ms, 0, 600000);
-    }
+    pulse(param("playTrig"));
+    isPlaying = true;
+  }
 
-    // Simulated playback timer for UI (substitute for RNBO playhead callback)
-    function startPlaybackTimer() {
-        stopPlaybackTimer();
-        let position = (rate >= 0) ? 0 : clips[currentClip].duration;
-        updateTransportUI(position);
+  function stop() {
+    pulse(param("stopTrig"));
+    isPlaying = false;
+  }
 
-        playbackTimer = setInterval(() => {
-            if (!isPlaying) { stopPlaybackTimer(); return; }
-            position += rate * 40;
-            if (rate >= 0 && position >= clips[currentClip].duration) {
-                if (loopMode === LOOP) {
-                    position = 0;
-                    seekPlayheadToClipEdge('start');
-                } else {
-                    stopClip();
-                }
-            } else if (rate < 0 && position <= 0) {
-                if (loopMode === LOOP) {
-                    position = clips[currentClip].duration;
-                    seekPlayheadToClipEdge('end');
-                } else {
-                    stopClip();
-                }
-            }
-            updateTransportUI(position);
-        }, 40);
-    }
+  // ----------------------------
+  // Init
+  // ----------------------------
+  window.initPlaylistUI = async function (rnboDevice, rnboContext) {
+    device = rnboDevice;
+    context = rnboContext;
 
-    function stopPlaybackTimer() {
-        if (playbackTimer) clearInterval(playbackTimer);
-        playbackTimer = null;
-    }
+    const ui = buildUI();
 
-    function updateTransportUI(position) {
-        document.getElementById('transport-current').innerText = msToTime(position);
-        document.getElementById('transport-total').innerText = msToTime(clips[currentClip].duration);
-        document.getElementById('transport-progress').value =
-            (clips[currentClip].duration ? 100 * position / clips[currentClip].duration : 0);
-    }
+    // Bind params
+    const pRate = param("rate");
+    const pLoop = param("loop");
+    const pOut = param("outGain");
 
-    function msToTime(ms) {
-        ms = Math.max(0, ms | 0);
-        const min = Math.floor(ms / 60000);
-        const sec = ((ms % 60000) / 1000).toFixed(1);
-        return `${min}:${sec.padStart(4, '0')}`;
-    }
+    ui.rate.addEventListener("input", () => {
+      rate = Number(ui.rate.value);
+      pRate.value = rate;
 
-    // Expose for debug
-    window._playlistUI = {
-        playClip,
-        stopClip,
-        seekPlayheadToClipEdge
+      // If reversing while playing, jump immediately
+      if (isPlaying && currentIndex >= 0 && rate < 0) {
+        const it = items[currentIndex];
+        param("jumpto").value = it.durationMs - 1;
+      }
+    });
+
+    ui.play.onclick = play;
+    ui.stop.onclick = stop;
+    ui.loop.onclick = () => {
+      isLoop = !isLoop;
+      pLoop.value = isLoop ? 1 : 0;
     };
 
+    // Load playlist
+    const playlist = await fetchJSON(PLAYLIST_JSON);
+
+    for (const filename of playlist.items) {
+      const audioBuffer = await fetchAndDecode(MEDIA_BASE + filename);
+      items.push({
+        filename,
+        audioBuffer,
+        durationMs:
+          (audioBuffer.length / audioBuffer.sampleRate) * 1000,
+      });
+    }
+
+    // Render list
+    ui.list.innerHTML = items
+      .map(
+        (it, i) => `
+        <div class="playlist-it-5d3648fdeb2a" data-i="${i}">
+          ${it.filename}
+        </div>`
+      )
+      .join("");
+
+    ui.list.querySelectorAll("[data-i]").forEach((el) => {
+      el.onclick = async () => {
+        await selectIndex(Number(el.dataset.i));
+        play();
+      };
+    });
+
+    // Auto-select first item
+    await selectIndex(0);
+  };
 })();
