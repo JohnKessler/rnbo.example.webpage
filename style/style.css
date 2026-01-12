@@ -1,90 +1,54 @@
-/* ==========================================================
-   Global RNBO Demo Styles (Token-aligned)
-   - Used by non-playlist pages (rnbo-root, keyboard, sliders)
-   ========================================================== */
-
-:root {
-  /* Match Penpot token values (duplicated here for independence) */
-  --ui-surface: #181824;
-  --ui-surface-2: #1c1c2a;
-  --ui-surface-hover: #202036;
-  --ui-surface-active: #2a2a40;
-
-  --ui-text: #ffffff;
-  --ui-text-muted: rgba(255,255,255,0.6);
-
-  --ui-accent: #d8d0ee;
-  --ui-border: rgba(255,255,255,0.08);
-
-  --ui-radius: 10px;
-  --ui-radius-pill: 999px;
-}
-
 html, body {
-  margin: 0;
-  padding: 0;
-  background: var(--ui-surface);
-  color: var(--ui-text);
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    margin: 0;
+    padding: 0;
 }
-
 #rnbo-root {
-  width: 100vw;
-  height: 100vh;
-  margin: auto;
-  max-width: 540px;
-  box-sizing: border-box;
-  padding: 16px;
+    height: 100vh;
+    width: 100vw;
 }
-
 #background {
-  position: absolute;
-  z-index: -1;
+    position: absolute;
+    z-index: -1;
 }
 
 h2, em {
-  width: 100%;
+    width: 100%;
+}
+
+#rnbo-root {
+    margin: auto;
+    max-width: 540px;
 }
 
 #rnbo-clickable-keyboard {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+    display: flex;
+    flex-wrap: wrap;
 }
 
 #rnbo-clickable-keyboard > div {
-  border: 1px solid var(--ui-border);
-  min-height: 50px;
-  flex-grow: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  border-radius: 8px;
-  background: var(--ui-surface-2);
-  color: var(--ui-text);
-  user-select: none;
+    margin: 2px;
+    border: solid black 1px;
+    min-height: 50px;
+    flex-grow: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
 }
 
 #rnbo-clickable-keyboard > div.clicked {
-  background: var(--ui-surface-active);
-  color: var(--ui-text);
-  border-color: rgba(216, 208, 238, 0.35);
+    background: #222222;
+    color: #dddddd;
 }
 
 #rnbo-parameter-sliders {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 16px;
+    display: flex;
+    flex-direction: column;
 }
 
 #rnbo-parameter-sliders > div {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+    display: flex;
 }
 
 #rnbo-parameter-sliders > div > input:first-of-type {
-  flex-grow: 1;
-  accent-color: var(--ui-accent);
+    flex-grow: 1;
 }
