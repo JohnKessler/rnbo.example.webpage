@@ -1,15 +1,24 @@
 // playlist-ui.js
 // RNBO Playlist UI (Web Export) — Reframe-integrated baseline
 //
-// Version: v1.10 (2026-01-11)
+// Version: v1.11 (2026-01-11)
 //
-// What’s new in v1.10:
-// - Adds robust jumpto support (optional). With your patch range 0..600000, jumpto is treated as milliseconds.
-// - Fixes reverse-start reliability when rate < 0 by starting from (durationMs - 1) via jumpto (when loop is OFF).
-// - Ensures AudioContext resume happens in the same user gesture as Play/Stop by dispatching "rnbo:gesture".
-// - Preserves existing DOM structure + CSS class names so styling remains intact.
-// - Keeps known-good functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
-//   drag reorder + persistence, keyboard shortcuts, touch-friendly interactions, volume via outGain.
+// Notes:
+// - This file preserves the Penpot/CSS-driven DOM structure and classnames.
+// - Updates focus ONLY on jumpto correctness + reverse-start reliability.
+// - jumpto is treated as milliseconds when its declared max > ~1.
+// - With your patch jumpto range: 0..600000 ms.
+// - Reverse start: when rate < 0, we always jump near the end using jumpto (even if loop is ON),
+//   because some RNBO patches won’t start reverse cleanly from 0.
+//
+// Expected RNBO parameters (by id):
+//   clipIndex, rate, loop, playTrig, stopTrig, outGain
+// Optional RNBO parameter (by id):
+//   jumpto  (ms; patch range 0..600000)
+// Expected RNBO external buffer name:
+//   "sample"
+// Optional RNBO outport message tag:
+//   "playhead" with ms as payload[0]
 
 (function () {
   "use strict";
@@ -26,10 +35,22 @@
 
   const DEFAULT_OUTGAIN = 120;
 
-  const PLAYHEAD_THROTTLE_MS = 16;
+  // UI throttles
+  const UI_THROTTLE_MS = 16;
+  const END_EPS_MS = 15;
 
-  // Your patch: jumpto ms range
-  const JUMPTO_MIN_MS = 0;
+  // When playhead port is stale, estimate from AudioContext time
+  const PORT_FRESH_MS = 120;
+
+  // Reverse-start assist fallback:
+  // briefly enable loop when rate < 0 so RNBO can wrap to end and run backwards.
+  const REVERSE_LOOP_ASSIST_MS = 90;
+
+  // Grace window after Play where we do NOT treat "rawMs <= 0" as reverse EOF
+  // (prevents instant stop at t=0 before RNBO has time to wrap/advance).
+  const REVERSE_EOF_GRACE_MS = 250;
+
+  // jumpto ms range (from patch)
   const JUMPTO_MAX_MS = 600000;
 
   // ----------------------------
@@ -53,7 +74,9 @@
     try {
       param.value = 1;
       setTimeout(() => {
-        try { param.value = 0; } catch (_) {}
+        try {
+          param.value = 0;
+        } catch (_) {}
       }, ms);
     } catch (_) {}
   }
@@ -71,15 +94,15 @@
   }
 
   function saveOrder(names) {
-    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+    } catch (_) {}
   }
 
   function loadOrder() {
     try {
       const raw = localStorage.getItem(ORDER_KEY);
-      if (!raw) return null;
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : null;
+      return raw ? JSON.parse(raw) : null;
     } catch (_) {
       return null;
     }
@@ -109,65 +132,8 @@
     return el;
   }
 
-  function dispatchGesture() {
-    // Lets app.js resume the AudioContext in the same user gesture
-    try { window.dispatchEvent(new Event("rnbo:gesture")); } catch (_) {}
-  }
-
   // ----------------------------
-  // Premium header effects
-  // ----------------------------
-  function installPremiumHeaderEffects(topEl, scrollEl) {
-    if (!topEl || !scrollEl) return;
-
-    let lastTop = scrollEl.scrollTop || 0;
-    let lastT = performance.now();
-    let rafPending = false;
-
-    function setSep(intensity01, vel01) {
-      const sep = clamp01(intensity01);
-      const v = clamp01(vel01);
-
-      const shadowA = sep * (0.22 + 0.12 * v);
-      const shadowB = sep * (0.16 + 0.08 * v);
-      const fadeStart = sep * (0.75 + 0.2 * v);
-
-      topEl.style.setProperty("--sep", String(sep));
-      topEl.style.setProperty("--shadowA", shadowA.toFixed(3));
-      topEl.style.setProperty("--shadowB", shadowB.toFixed(3));
-      topEl.style.setProperty("--fadeStart", fadeStart.toFixed(3));
-    }
-
-    function update() {
-      rafPending = false;
-
-      const now = performance.now();
-      const st = scrollEl.scrollTop || 0;
-
-      const dt = Math.max(8, now - lastT);
-      const dy = st - lastTop;
-      const vel = Math.abs(dy) / (dt / 1000); // px/s
-      const vel01 = clamp01(vel / 1800);
-
-      const intensity01 = st > 2 ? 1 : st > 0 ? 0.35 : 0;
-      setSep(intensity01, vel01);
-
-      lastTop = st;
-      lastT = now;
-    }
-
-    function onScroll() {
-      if (rafPending) return;
-      rafPending = true;
-      requestAnimationFrame(update);
-    }
-
-    scrollEl.addEventListener("scroll", onScroll, { passive: true });
-    setSep((scrollEl.scrollTop || 0) > 2 ? 1 : 0, 0);
-  }
-
-  // ----------------------------
-  // Waveform drawing
+  // Waveform (peaks)
   // ----------------------------
   function buildPeaks(audioBuffer, width) {
     const ch0 = audioBuffer.getChannelData(0);
@@ -176,7 +142,8 @@
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1, max = -1;
+      let min = 1,
+        max = -1;
       const start = x * spp;
       const end = Math.min(len, (x + 1) * spp);
       for (let i = start; i < end; i++) {
@@ -221,154 +188,141 @@
   }
 
   // ----------------------------
-  // Icons
-  // ----------------------------
-  function playIconSVG() {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("width", "18");
-    svg.setAttribute("height", "18");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", "M8 5v14l11-7z");
-    svg.appendChild(path);
-    return svg;
-  }
-
-  function stopIconSVG() {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("width", "18");
-    svg.setAttribute("height", "18");
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    rect.setAttribute("x", "7");
-    rect.setAttribute("y", "7");
-    rect.setAttribute("width", "10");
-    rect.setAttribute("height", "10");
-    svg.appendChild(rect);
-    return svg;
-  }
-
-  // ----------------------------
-  // UI Build (preserved)
+  // UI build (PRESERVED STRUCTURE)
   // ----------------------------
   function buildUI() {
     const root = document.getElementById("playlist-ui");
     if (!root) throw new Error('Missing #playlist-ui container in playlist.html');
 
+    root.innerHTML = "";
+
     const top = createEl("div", { className: "rnbo-top" });
-    const scroll = createEl("div", { className: "rnbo-scroll" });
 
-    const title = createEl("div", { className: "rnbo-title", innerText: "Playlist" });
+    const headerRowTitle = createEl("div", { className: "header-row-title" });
 
-    const progressLabel = createEl("div", { className: "rnbo-readout", innerText: "Preload: 0%" });
-    const progress = createEl("progress", { className: "rnbo-progress", value: 0, max: 1 });
-
-    const btnPlay = createEl(
-      "button",
-      {
-        className: "icon-button rnbo-iconbtn rnbo-play",
-        type: "button",
-        title: "Play",
-        ariaLabel: "Play",
-      },
-      [playIconSVG()]
-    );
-
-    const btnStop = createEl(
-      "button",
-      {
-        className: "icon-button rnbo-iconbtn rnbo-stop",
-        type: "button",
-        title: "Stop",
-        ariaLabel: "Stop",
-      },
-      [stopIconSVG()]
-    );
-
-    const loopToggle = createEl("input", { type: "checkbox" });
-    const loopLabel = createEl("label", { className: "rnbo-label" }, [
-      loopToggle,
-      createEl("span", { innerText: "Loop" }),
+    const titleStack = createEl("div", { className: "title-stack" }, [
+      createEl("h1", { className: "rnbo-title", innerText: "RNBO Playlist" }),
+      createEl("div", { className: "rnbo-meta", innerText: "Web export playlist" }),
+      createEl("div", { className: "rnbo-preload", innerText: "Preload: 0%" }),
     ]);
 
+    const statusText = createEl("div", { className: "status-text", innerText: "Ready" });
+
+    headerRowTitle.append(titleStack, statusText);
+
+    const headerRowTransport = createEl("div", { className: "header-row-transport" });
+
+    const transportLeft = createEl("div", { className: "transport-left" });
+
+    const btnPlay = createEl("button", {
+      className: "transport-btn play-btn",
+      type: "button",
+      innerText: "▶",
+      ariaLabel: "Play",
+    });
+
+    const btnStop = createEl("button", {
+      className: "transport-btn stop-btn",
+      type: "button",
+      innerText: "■",
+      ariaLabel: "Stop",
+    });
+
+    const btnLoop = createEl("button", {
+      className: "transport-btn loop-btn",
+      type: "button",
+      innerText: "Loop",
+      ariaLabel: "Loop",
+    });
+
+    const rateGroup = createEl("div", { className: "rate-group" });
+
+    const rateLabel = createEl("span", { className: "rnbo-meta rate-label", innerText: "Rate" });
+
     const rate = createEl("input", {
-      className: "rnbo-slider",
+      className: "rate-slider",
       type: "range",
       min: -1,
       max: 2,
       step: 0.01,
       value: 1,
+      ariaLabel: "Rate",
     });
-    const rateVal = createEl("span", { className: "rnbo-readout", innerText: "1.00x" });
-    const rateLabel = createEl("label", { className: "rnbo-label" }, [
-      createEl("span", { innerText: "Speed" }),
-      rate,
-      rateVal,
-    ]);
+
+    const rateVal = createEl("span", { className: "rnbo-readout rate-readout", innerText: "1.00x" });
+
+    rateGroup.append(rateLabel, rate, rateVal);
+
+    transportLeft.append(btnPlay, btnStop, btnLoop, rateGroup);
 
     const vol = createEl("input", {
-      className: "rnbo-slider",
+      className: "volume-slider",
       type: "range",
       min: 0,
       max: 158,
       step: 1,
-      value: DEFAULT_OUTGAIN,
+      value: 120,
+      ariaLabel: "Volume",
     });
-    const volVal = createEl("span", { className: "rnbo-readout", innerText: String(DEFAULT_OUTGAIN) });
-    const volLabel = createEl("label", { className: "rnbo-label" }, [
-      createEl("span", { innerText: "Volume" }),
+    const volVal = createEl("span", { className: "rnbo-readout rnbo-volreadout", innerText: "120" });
+    const volumeGroup = createEl("div", { className: "volume-group" }, [
+      createEl("span", { className: "rnbo-meta rnbo-voltag", innerText: "VOL" }),
       vol,
       volVal,
     ]);
 
-    const controls = createEl("div", { className: "rnbo-controls" }, [
-      btnPlay,
-      btnStop,
-      loopLabel,
-      rateLabel,
-      volLabel,
-    ]);
+    headerRowTransport.append(
+      transportLeft,
+      createEl("div", { className: "transport-spacer" }),
+      volumeGroup
+    );
 
-    const playheadReadout = createEl("div", { className: "rnbo-readout", innerText: "Playhead: 0 ms" });
+    const headerRowProgress = createEl("div", { className: "header-row-progress" });
 
-    const hint = createEl("div", {
-      className: "rnbo-hint rnbo-readout",
-      innerText:
-        "Shortcuts: Space play/stop · Arrows prev/next · Enter play · Esc stop · L loop · Drag ☰ to reorder",
-    });
+    const progressTrack = createEl("div", { className: "progress-track" });
+    const progressFill = createEl("div", { className: "progress-fill" });
+    progressTrack.appendChild(progressFill);
 
+    const timeRow = createEl("div", { className: "time-row" });
+    const timeNow = createEl("span", { className: "time-now", innerText: "0:00" });
+    const timeDur = createEl("span", { className: "time-dur", innerText: "0:00" });
+    timeRow.append(timeNow, timeDur);
+
+    headerRowProgress.append(progressTrack, timeRow);
+
+    top.append(headerRowTitle, headerRowTransport, headerRowProgress);
+
+    const scroll = createEl("div", { className: "rnbo-scroll" });
     const list = createEl("div", { className: "rnbo-list" });
-
-    root.innerHTML = "";
-    top.appendChild(title);
-    top.appendChild(progressLabel);
-    top.appendChild(progress);
-    top.appendChild(controls);
-    top.appendChild(playheadReadout);
-    top.appendChild(hint);
 
     scroll.appendChild(list);
 
-    root.appendChild(top);
-    root.appendChild(scroll);
-
-    installPremiumHeaderEffects(top, scroll);
+    root.append(top, scroll);
 
     return {
       root,
       top,
       scroll,
-      progress,
-      progressLabel,
+      list,
+
+      // header
+      preloadText: titleStack.querySelector(".rnbo-preload"),
+      statusText,
+
+      // transport
       btnPlay,
       btnStop,
-      loopToggle,
+      btnLoop,
       rate,
       rateVal,
       vol,
       volVal,
-      playheadReadout,
-      list,
+
+      // progress
+      progressTrack,
+      progressFill,
+      timeNow,
+      timeDur,
     };
   }
 
@@ -378,71 +332,30 @@
   async function initPlaylistUI(device, context) {
     const ui = buildUI();
 
-    // RNBO params (by id, not index)
+    // RNBO params
     const pClipIndex = ensureParam(device, "clipIndex");
     const pRate = ensureParam(device, "rate");
+    const pJumpTo =
+      device.parametersById?.get("jumpto") ||
+      (device.parameters || []).find((pp) => pp.id === "jumpto") ||
+      null;
+    const pOutGain = ensureParam(device, "outGain");
     const pLoop = ensureParam(device, "loop");
     const pPlayTrig = ensureParam(device, "playTrig");
     const pStopTrig = ensureParam(device, "stopTrig");
-    const pOutGain = ensureParam(device, "outGain");
 
-    // Optional jumpto
-    const pJumpTo =
-      (device.parametersById?.get("jumpto") ||
-        (device.parameters || []).find((pp) => pp.id === "jumpto")) || null;
-
-    // Prime audio (browser autoplay policies)
+    // Prime audio (browser policies)
     async function primeAudio() {
-      dispatchGesture(); // ask app.js to resume as well (same gesture)
+      // Also poke app.js's resume hook if present
+      try {
+        window.dispatchEvent(new Event("rnbo:gesture"));
+      } catch (_) {}
       try {
         if (context && context.state !== "running") await context.resume();
       } catch (_) {}
     }
 
-    function supportsJumpTo() {
-      return !!pJumpTo && typeof pJumpTo.value === "number";
-    }
-
-    // Detect if jumpto is normalized (max <= 1) vs ms (your fixed 0..600000)
-    function jumpToIsNormalized() {
-      if (!supportsJumpTo()) return false;
-      const mx = Number(pJumpTo.max ?? pJumpTo.maximum ?? pJumpTo.maximumValue);
-      return Number.isFinite(mx) && mx <= 1.0001;
-    }
-
-    function setJumpToMs(targetMs, itemDurationMs) {
-      if (!supportsJumpTo()) return false;
-
-      const dur = Math.max(0, Number(itemDurationMs) || 0);
-      let ms = Number(targetMs);
-      if (!Number.isFinite(ms)) ms = 0;
-
-      // Clamp to patch range (ms) when not normalized
-      if (!jumpToIsNormalized()) {
-        ms = Math.max(JUMPTO_MIN_MS, Math.min(JUMPTO_MAX_MS, ms));
-      }
-
-      // Clamp to track duration if known; avoid exact end by using dur-1
-      if (dur > 1) {
-        ms = Math.max(0, Math.min(ms, Math.floor(dur - 1)));
-      } else {
-        ms = Math.max(0, ms);
-      }
-
-      try {
-        if (jumpToIsNormalized() && dur > 0) {
-          pJumpTo.value = clamp01(ms / dur);
-        } else {
-          pJumpTo.value = ms;
-        }
-        return true;
-      } catch (e) {
-        console.warn("Failed to set jumpto:", e);
-        return false;
-      }
-    }
-
-    // Load manifest + order
+    // Manifest + ordering
     const manifest = await fetchJSON(MANIFEST_URL);
     const filenames = manifest.items || [];
 
@@ -463,93 +376,246 @@
       const audioBuffer = await context.decodeAudioData(ab);
       const peaks = buildPeaks(audioBuffer, WAVE_W);
       const durationMs = (audioBuffer.length / audioBuffer.sampleRate) * 1000;
-      items.push({ name, audioBuffer, peaks, durationMs, canvas: null, rowEl: null, handleEl: null });
+      items.push({
+        name,
+        audioBuffer,
+        peaks,
+        durationMs,
+        canvas: null,
+        rowEl: null,
+        handleEl: null,
+      });
 
       const frac = (i + 1) / Math.max(1, ordered.length);
-      ui.progress.value = frac;
-      ui.progressLabel.innerText = `Preload: ${Math.round(frac * 100)}% (${i + 1}/${ordered.length})`;
+      if (ui.preloadText) ui.preloadText.innerText = `Preload: ${Math.round(frac * 100)}%`;
     }
 
-    ui.progress.value = 1;
-    ui.progressLabel.innerText = `Preload complete: ${ordered.length} files`;
+    if (ui.preloadText) ui.preloadText.innerText = "Preload complete";
 
     // State
-    let selectedName = items[0]?.name || null;
-    let lastPlayheadMs = 0;
-    let endedAndStopped = true;
-    let isPlaying = false;
+    let selectedIdx = 0;
+    let isLoop = false;
 
-    function getSelectedIndex() {
-      const idx = items.findIndex((x) => x.name === selectedName);
-      return idx >= 0 ? idx : 0;
+    let isPlayingUI = false;
+
+    // RNBO playhead raw (monotonic within track)
+    let portPlayheadMs = 0;
+    let lastPortAt = 0;
+
+    // We rebase port time so our display can always be clamped into [0..dur]
+    let portOffsetMs = 0;
+
+    // Estimation anchor when port is stale
+    let anchorCtxTime = context.currentTime;
+    let anchorRawMs = 0;
+
+    // Display ms (clamped)
+    let displayMs = 0;
+
+    // Prevent resetting repeatedly while idle
+    let didAutoResetAfterEOF = false;
+
+    // Reverse EOF grace after pressing play (prevents instant reverse-EOF at t=0)
+    let reverseEOFIgnoreUntil = 0;
+
+    function getRateNow() {
+      const r = Number(pRate.value);
+      return Number.isFinite(r) ? r : 1;
     }
 
-    async function loadSelectedIntoRNBO() {
-      const idx = getSelectedIndex();
-      const it = items[idx];
-      if (!it) return;
-
-      // Ensure buffer updated
-      await device.setDataBuffer("sample", it.audioBuffer);
-      pClipIndex.value = idx;
-
-      // Reset playhead/flags
-      ui.playheadReadout.innerText = "Playhead: 0 ms";
-      lastPlayheadMs = 0;
-      endedAndStopped = true;
-      isPlaying = false;
-
-      // Reset jumpto to 0 for deterministic next play
-      if (supportsJumpTo()) setJumpToMs(0, it.durationMs);
-
-      // Redraw selection
-      items.forEach((x, i2) => {
-        if (x.canvas) drawWaveform(x.canvas, x.peaks, i2 === idx ? 0 : null, x.durationMs);
-      });
+    function msToTime(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return `${m}:${String(r).padStart(2, "0")}`;
     }
 
-    async function selectByIndex(idx) {
-      idx = Math.max(0, Math.min(items.length - 1, idx));
+    function setProgress(frac) {
+      const f = Math.max(0, Math.min(1, frac));
+      ui.progressFill.style.transform = `scaleX(${f})`;
+    }
 
-      if (isPlaying) {
-        dispatchGesture();
-        pulseParam(pStopTrig);
-        isPlaying = false;
-        endedAndStopped = true;
+    function setTime(ms, dur) {
+      ui.timeNow.innerText = msToTime(ms);
+      ui.timeDur.innerText = msToTime(dur);
+    }
+
+    function redrawWaveforms() {
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (!it.canvas) continue;
+        const isSel = i === selectedIdx;
+        drawWaveform(it.canvas, it.peaks, isSel ? displayMs : null, it.durationMs);
+      }
+    }
+
+    function resetUIToStart() {
+      const it = items[selectedIdx];
+      const dur = it?.durationMs || 0;
+      displayMs = 0;
+      setProgress(0);
+      setTime(0, dur);
+      redrawWaveforms();
+    }
+
+    function paintFromRaw(effectiveMs) {
+      const it = items[selectedIdx];
+      const dur = it?.durationMs || 0;
+      const ms = Math.max(0, Math.min(dur > 0 ? dur : effectiveMs, effectiveMs));
+
+      displayMs = ms;
+
+      const frac = dur > 0 ? ms / dur : 0;
+      setProgress(frac);
+      setTime(ms, dur);
+      redrawWaveforms();
+    }
+
+    function getEffectiveRaw() {
+      const now = performance.now();
+      const age = now - lastPortAt;
+
+      if (age <= PORT_FRESH_MS) {
+        return portPlayheadMs + portOffsetMs;
       }
 
-      selectedName = items[idx].name;
-      renderList();
-      await loadSelectedIntoRNBO();
+      // Estimate using AudioContext time + rate
+      const dt = (context.currentTime - anchorCtxTime) * 1000;
+      const rate = getRateNow();
+      return anchorRawMs + dt * rate + portOffsetMs;
     }
 
-    function redrawSelected(ms) {
-      const idx = getSelectedIndex();
-      const it = items[idx];
-      if (!it || !it.canvas) return;
-      drawWaveform(it.canvas, it.peaks, ms, it.durationMs);
+    // --------- UPDATED jumpto handling (surgical, no DOM changes) ----------
+    function setJumpToMs(targetMs, { startIfNeeded = true } = {}) {
+      if (!pJumpTo) return false;
+
+      const it = items[selectedIdx];
+      const dur = Number(it?.durationMs || 0);
+
+      let ms = Number(targetMs);
+      if (!Number.isFinite(ms)) ms = 0;
+
+      // Clamp to patch-declared ms range (your patch: 0..600000), if available.
+      // RNBO param objects sometimes expose range as max/min OR maximum/minimum depending on build.
+      const declaredMax = Number(pJumpTo.max ?? pJumpTo.maximum);
+      const declaredMin = Number(pJumpTo.min ?? pJumpTo.minimum);
+
+      // If declared max is ~1, treat jumpto as normalized 0..1; otherwise treat as milliseconds.
+      const useNormalized = Number.isFinite(declaredMax) && declaredMax <= 1.0001;
+
+      if (useNormalized) {
+        // We'll convert to 0..1 later using duration
+        ms = Math.max(0, ms);
+      } else {
+        const lo = Number.isFinite(declaredMin) ? declaredMin : 0;
+        const hi = Number.isFinite(declaredMax) ? declaredMax : JUMPTO_MAX_MS;
+        ms = Math.max(lo, Math.min(hi, ms));
+      }
+
+      // Also clamp to current item duration, and avoid setting exactly "dur" (use dur-1)
+      if (Number.isFinite(dur) && dur > 1) {
+        ms = Math.max(0, Math.min(ms, Math.floor(dur - 1)));
+      } else {
+        ms = Math.max(0, ms);
+      }
+
+      try {
+        pJumpTo.value = useNormalized && dur > 0 ? clamp01(ms / dur) : ms;
+      } catch (_) {}
+
+      if (!startIfNeeded && !isPlayingUI) return true;
+
+      didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
+      displayMs = ms;
+      paintFromRaw(ms);
+      return true;
+    }
+
+    const rowEls = [];
+
+    function applyRowActiveClass() {
+      for (let i = 0; i < rowEls.length; i++) {
+        rowEls[i].classList.toggle("selected", i === selectedIdx);
+      }
+    }
+
+    // ----------------------------
+    // Build list
+    // ----------------------------
+    function renderList() {
+      ui.list.innerHTML = "";
+      rowEls.length = 0;
+
+      items.forEach((it, idx) => {
+        const handle = createEl("div", { className: "rnbo-handle", innerText: "☰" });
+        const indexEl = createEl("div", { className: "rnbo-index", innerText: String(idx + 1) });
+
+        const leftStack = createEl("div", { className: "rnbo-left-stack" }, [handle, indexEl]);
+
+        const info = createEl("div", { className: "rnbo-item-info" }, [
+          createEl("div", { className: "rnbo-item-title", innerText: it.name }),
+          createEl("div", {
+            className: "rnbo-item-meta",
+            innerText: `${Math.round(it.durationMs)}ms • ${Math.round(it.audioBuffer.sampleRate)} Hz`,
+          }),
+        ]);
+
+        const header = createEl("div", { className: "rnbo-row-header" }, [leftStack, info]);
+
+        const canvas = createEl("canvas", {
+          className: "rnbo-canvas",
+          width: WAVE_W,
+          height: WAVE_H,
+        });
+
+        it.canvas = canvas;
+        it.handleEl = handle;
+
+        const row = createEl(
+          "div",
+          { className: "rnbo-row", dataset: { index: String(idx) } },
+          [header, canvas]
+        );
+
+        row.addEventListener("click", () => {
+          if (idx === selectedIdx) return;
+          selectByIndex(idx).catch(console.error);
+        });
+
+        ui.list.appendChild(row);
+        rowEls.push(row);
+
+        drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null, it.durationMs);
+      });
+
+      applyRowActiveClass();
+      attachDragHandlers();
     }
 
     // ----------------------------
     // Drag reorder
     // ----------------------------
-    const dragState = { active: false, draggingName: null };
+    const dragState = { active: false, draggingIndex: -1 };
 
     function moveItem(fromIdx, toIdx) {
       if (fromIdx === toIdx) return;
       const [moved] = items.splice(fromIdx, 1);
       items.splice(toIdx, 0, moved);
 
+      // Update selection index
+      if (selectedIdx === fromIdx) selectedIdx = toIdx;
+      else if (fromIdx < selectedIdx && toIdx >= selectedIdx) selectedIdx -= 1;
+      else if (fromIdx > selectedIdx && toIdx <= selectedIdx) selectedIdx += 1;
+
+      saveOrder(items.map((x) => x.name));
       renderList();
-      saveOrder(items.map((it) => it.name));
-      pClipIndex.value = getSelectedIndex();
     }
 
     function attachDragHandlers() {
-      items.forEach((it) => {
+      items.forEach((it, idx) => {
         const handle = it.handleEl;
-        const row = it.rowEl;
-        if (!handle || !row) return;
+        if (!handle) return;
         if (handle._rnboDragAttached) return;
         handle._rnboDragAttached = true;
 
@@ -559,8 +625,8 @@
           handle.setPointerCapture?.(e.pointerId);
 
           dragState.active = true;
-          dragState.draggingName = it.name;
-          row.classList.add("dragging");
+          dragState.draggingIndex = idx;
+          rowEls[idx]?.classList.add("dragging");
         });
 
         handle.addEventListener("pointermove", (e) => {
@@ -569,22 +635,22 @@
           const overRow = document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".rnbo-row");
           if (!overRow) return;
 
-          const draggingIdx = items.findIndex((x) => x.name === dragState.draggingName);
-          const overName = overRow.dataset.name;
-          const overIdx = items.findIndex((x) => x.name === overName);
+          const overIdx = Number(overRow.dataset.index);
+          const fromIdx = dragState.draggingIndex;
 
-          if (draggingIdx < 0 || overIdx < 0 || draggingIdx === overIdx) return;
-          moveItem(draggingIdx, overIdx);
+          if (!Number.isFinite(overIdx) || overIdx < 0) return;
+          if (fromIdx < 0 || fromIdx >= items.length) return;
+          if (overIdx === fromIdx) return;
+
+          moveItem(fromIdx, overIdx);
+          dragState.draggingIndex = overIdx;
         });
 
         function endDrag() {
           if (!dragState.active) return;
           dragState.active = false;
-
-          const draggingIdx = items.findIndex((x) => x.name === dragState.draggingName);
-          if (draggingIdx >= 0) items[draggingIdx].rowEl?.classList.remove("dragging");
-
-          dragState.draggingName = null;
+          rowEls.forEach((r) => r.classList.remove("dragging"));
+          dragState.draggingIndex = -1;
         }
 
         handle.addEventListener("pointerup", endDrag);
@@ -593,204 +659,348 @@
       });
     }
 
-    function renderList() {
-      ui.list.innerHTML = "";
+    // ----------------------------
+    // RNBO buffer load
+    // ----------------------------
+    async function loadSelectedIntoRNBO() {
+      const it = items[selectedIdx];
+      if (!it) return;
 
-      const selectedIdx = getSelectedIndex();
+      await device.setDataBuffer("sample", it.audioBuffer);
 
-      items.forEach((it, idx) => {
-        const handle = createEl("div", { className: "rnbo-handle", innerText: "☰" });
+      try {
+        pClipIndex.value = selectedIdx;
+      } catch (_) {}
 
-        const filenameEl = createEl("div", { className: "rnbo-filename", innerText: it.name });
-        const metaEl = createEl("div", { className: "rnbo-meta", innerText: `${Math.round(it.durationMs)} ms` });
+      // Reset playhead state
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
 
-        const left = createEl("div", { className: "rnbo-row-left" }, [handle, filenameEl]);
-        const header = createEl("div", { className: "rnbo-row-header" }, [left, metaEl]);
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
 
-        const canvas = createEl("canvas", { className: "rnbo-canvas" });
-        canvas.width = WAVE_W;
-        canvas.height = WAVE_H;
+      didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
 
-        it.canvas = canvas;
-        it.handleEl = handle;
+      resetUIToStart();
+    }
 
-        drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null, it.durationMs);
+    async function selectByIndex(idx) {
+      idx = Math.max(0, Math.min(items.length - 1, idx));
+      if (idx === selectedIdx) return;
 
-        const row = createEl(
-          "div",
-          {
-            className: "rnbo-row" + (idx === selectedIdx ? " selected" : ""),
-            dataset: { name: it.name },
-          },
-          [header, canvas]
-        );
+      // Stop if playing
+      if (isPlayingUI) {
+        pulseParam(pStopTrig);
+        isPlayingUI = false;
+        ui.btnPlay.classList.remove("is-on");
+        ui.statusText.innerText = "Ready";
+      }
 
-        row.addEventListener("click", async () => {
-          if (dragState.active) return;
-          await selectByIndex(idx);
-        });
+      selectedIdx = idx;
 
-        it.rowEl = row;
-        ui.list.appendChild(row);
-      });
-
-      attachDragHandlers();
+      renderList();
+      await loadSelectedIntoRNBO();
     }
 
     renderList();
+    await loadSelectedIntoRNBO();
 
     // ----------------------------
-    // Controls
+    // Seek via header progress click/drag
     // ----------------------------
-    async function doPlay() {
-      dispatchGesture();
+    function seekFromEvent(ev) {
+      const it = items[selectedIdx];
+      if (!it) return;
+      const dur = it.durationMs || 0;
+      if (dur <= 0) return;
+
+      const r = ui.progressTrack.getBoundingClientRect();
+      const x = ev.clientX - r.left;
+      const frac = Math.max(0, Math.min(1, x / Math.max(1, r.width)));
+      const ms = frac * dur;
+
+      if (pJumpTo) {
+        const ok = setJumpToMs(ms, { startIfNeeded: true });
+        if (ok) {
+          // Keep UI consistent immediately
+          displayMs = ms;
+          paintFromRaw(ms);
+        }
+      }
+    }
+
+    let isSeeking = false;
+
+    ui.progressTrack.addEventListener("pointerdown", (ev) => {
+      isSeeking = true;
+      ui.progressTrack.setPointerCapture?.(ev.pointerId);
+      seekFromEvent(ev);
+    });
+
+    ui.progressTrack.addEventListener("pointermove", (ev) => {
+      if (!isSeeking) return;
+      seekFromEvent(ev);
+    });
+
+    ui.progressTrack.addEventListener("pointerup", () => {
+      isSeeking = false;
+    });
+
+    ui.progressTrack.addEventListener("pointercancel", () => {
+      isSeeking = false;
+    });
+
+    // ----------------------------
+    // Transport
+    // ----------------------------
+    async function playFromBeginning() {
       await primeAudio();
 
-      const idx = getSelectedIndex();
-      const it = items[idx];
-      const dur = it ? it.durationMs : 0;
-
-      const rateNow = parseFloat(pRate.value);
-      const isReverse = Number.isFinite(rateNow) && rateNow < 0;
-      const loopOn = (pLoop.value ?? 0) >= 0.5;
-
-      // Always re-arm so play works after EOF without requiring Stop
+      // Always re-arm: stop first, reset our timebase, then play.
       pulseParam(pStopTrig);
-      lastPlayheadMs = 0;
 
-      // If we have jumpto, make start deterministic:
-      // - forward: 0
-      // - reverse & loop OFF: near end
-      if (supportsJumpTo() && dur > 0) {
-        const startMs = isReverse && !loopOn ? Math.max(0, dur - 1) : 0;
-        setJumpToMs(startMs, dur);
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
+
+      didAutoResetAfterEOF = false;
+
+      // Reverse grace window: don't instantly treat raw=0 as EOF
+      reverseEOFIgnoreUntil =
+        getRateNow() < 0 ? performance.now() + REVERSE_EOF_GRACE_MS : 0;
+
+      resetUIToStart();
+
+      isPlayingUI = true;
+      ui.btnPlay.classList.add("is-on");
+      ui.statusText.innerText = "Playing";
+
+      const rateNow = getRateNow();
+
+      // ✅ FIX: Reverse-start assist should trigger whenever rate < 0 (even if loop is ON).
+      // Starting from ~end avoids the "can't start unless loop is enabled" behavior.
+      if (rateNow < 0) {
+        const it = items[selectedIdx];
+        const dur = it?.durationMs || 0;
+
+        // Prefer jumpto if available
+        if (pJumpTo && dur > 0) {
+          setJumpToMs(Math.max(0, dur - 1), { startIfNeeded: false });
+          pulseParam(pPlayTrig);
+          return;
+        }
+
+        // Fallback only when loop is OFF
+        if (!isLoop) {
+          try {
+            pLoop.value = 1; // do NOT change UI button state
+            pulseParam(pPlayTrig);
+
+            setTimeout(() => {
+              try {
+                pLoop.value = 0;
+              } catch (_) {}
+            }, REVERSE_LOOP_ASSIST_MS);
+
+            return;
+          } catch (err) {
+            console.warn("Reverse start assist failed; falling back to normal play.", err);
+          }
+        }
       }
 
-      endedAndStopped = false;
-      isPlaying = true;
       pulseParam(pPlayTrig);
     }
 
-    function doStop() {
-      dispatchGesture();
+    function stopNow() {
       pulseParam(pStopTrig);
-      isPlaying = false;
-      endedAndStopped = true;
-      lastPlayheadMs = 0;
 
-      const it = items[getSelectedIndex()];
-      const dur = it ? it.durationMs : 0;
+      isPlayingUI = false;
+      ui.btnPlay.classList.remove("is-on");
+      ui.statusText.innerText = "Ready";
 
-      if (supportsJumpTo() && dur > 0) setJumpToMs(0, dur);
+      // Hard reset UI timebase
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
 
-      ui.playheadReadout.innerText = "Playhead: 0 ms";
-      redrawSelected(0);
+      didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
+
+      resetUIToStart();
     }
 
-    ui.btnPlay.addEventListener("click", () => { doPlay().catch(console.error); });
-    ui.btnStop.addEventListener("click", doStop);
+    ui.btnPlay.addEventListener("click", () => {
+      playFromBeginning().catch(console.error);
+    });
 
-    ui.loopToggle.addEventListener("change", () => {
-      pLoop.value = ui.loopToggle.checked ? 1 : 0;
-      // don’t force stop/play here — just change loop state
+    ui.btnStop.addEventListener("click", () => {
+      stopNow();
+    });
+
+    ui.btnLoop.addEventListener("click", () => {
+      const wasLoop = isLoop;
+      isLoop = !isLoop;
+
+      try {
+        pLoop.value = isLoop ? 1 : 0;
+      } catch (_) {}
+      ui.btnLoop.classList.toggle("is-on", isLoop);
+
+      // If loop gets turned off while playing reverse, don't accidentally trigger EOF instantly.
+      if (wasLoop && !isLoop && getRateNow() < 0) {
+        reverseEOFIgnoreUntil = performance.now() + REVERSE_EOF_GRACE_MS;
+      }
     });
 
     ui.rate.addEventListener("input", () => {
       const v = parseFloat(ui.rate.value);
-      pRate.value = v;
+      try {
+        pRate.value = v;
+      } catch (_) {}
       ui.rateVal.innerText = `${v.toFixed(2)}x`;
     });
 
     ui.vol.addEventListener("input", () => {
       const v = Math.round(parseFloat(ui.vol.value));
-      pOutGain.value = v;
+      try {
+        pOutGain.value = v;
+      } catch (_) {}
       ui.volVal.innerText = String(v);
     });
 
-    // Initialize defaults (IMPORTANT: actually push to RNBO)
-    pOutGain.value = DEFAULT_OUTGAIN;
+    // Initial values
+    try {
+      pOutGain.value = DEFAULT_OUTGAIN;
+    } catch (_) {}
     ui.vol.value = String(DEFAULT_OUTGAIN);
     ui.volVal.innerText = String(DEFAULT_OUTGAIN);
 
-    // Sync initial UI from RNBO params
     ui.rate.value = String(pRate.value ?? 1);
-    ui.rateVal.innerText = `${(pRate.value ?? 1).toFixed(2)}x`;
-    ui.loopToggle.checked = (pLoop.value ?? 0) >= 0.5;
+    ui.rateVal.innerText = `${Number(pRate.value ?? 1).toFixed(2)}x`;
 
     // ----------------------------
-    // Playhead subscriber
+    // Playhead subscribe
     // ----------------------------
-    let lastPaint = 0;
-
     device.messageEvent.subscribe((ev) => {
       if (!ev || ev.tag !== "playhead") return;
 
-      const ms = Array.isArray(ev.payload) ? (ev.payload[0] ?? 0) : ev.payload;
+      const v = Array.isArray(ev.payload) ? ev.payload[0] : ev.payload;
+      if (!Number.isFinite(v)) return;
+
       const now = performance.now();
+      portPlayheadMs = v;
+      lastPortAt = now;
 
-      const loopOn = (pLoop.value ?? 0) >= 0.5;
+      // Update estimation anchors when port is fresh
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = v - portOffsetMs;
+    });
 
-      // EOF detection:
-      // - forward: patch often snaps to 0 at end
-      // - reverse: hitting 0 should also end when loop OFF
-      if (!loopOn && !endedAndStopped && ms <= 0 && lastPlayheadMs > 0) {
-        // Stop and reset UI so Play works again
-        pulseParam(pStopTrig);
-        isPlaying = false;
-        endedAndStopped = true;
+    // ----------------------------
+    // Animation/update loop
+    // ----------------------------
+    let lastPaintAt = 0;
 
-        const it = items[getSelectedIndex()];
-        if (it && supportsJumpTo() && it.durationMs > 0) setJumpToMs(0, it.durationMs);
+    function tick() {
+      requestAnimationFrame(tick);
 
-        ui.playheadReadout.innerText = "Playhead: 0 ms";
-        redrawSelected(0);
-        lastPlayheadMs = 0;
-        return;
+      const now = performance.now();
+      if (now - lastPaintAt < UI_THROTTLE_MS) return;
+      lastPaintAt = now;
+
+      const it = items[selectedIdx];
+      const dur = it?.durationMs || 0;
+      const effective = getEffectiveRaw();
+      const rate = getRateNow();
+
+      if (isPlayingUI) {
+        if (!isLoop) {
+          if (rate >= 0) {
+            // forward EOF: stop at end
+            if (effective >= dur - END_EPS_MS) {
+              isPlayingUI = false;
+              ui.btnPlay.classList.remove("is-on");
+              ui.statusText.innerText = "Ready";
+              didAutoResetAfterEOF = true;
+
+              // hard reset UI to 0
+              portPlayheadMs = 0;
+              lastPortAt = 0;
+              portOffsetMs = 0;
+              anchorCtxTime = context.currentTime;
+              anchorRawMs = 0;
+
+              resetUIToStart();
+              return;
+            }
+          } else {
+            // reverse EOF: stop at 0
+            const ignore =
+              reverseEOFIgnoreUntil && performance.now() < reverseEOFIgnoreUntil;
+            if (!ignore && effective <= 0 + END_EPS_MS) {
+              isPlayingUI = false;
+              ui.btnPlay.classList.remove("is-on");
+              ui.statusText.innerText = "Ready";
+              didAutoResetAfterEOF = true;
+
+              portPlayheadMs = 0;
+              lastPortAt = 0;
+              portOffsetMs = 0;
+              anchorCtxTime = context.currentTime;
+              anchorRawMs = 0;
+
+              resetUIToStart();
+              return;
+            }
+          }
+        }
+      } else {
+        if (didAutoResetAfterEOF) {
+          // already reset; do nothing
+        }
       }
 
-      lastPlayheadMs = ms;
+      // Paint
+      paintFromRaw(effective);
+    }
 
-      if (!isPlaying) return;
-      if (now - lastPaint < PLAYHEAD_THROTTLE_MS) return;
-      lastPaint = now;
-
-      ui.playheadReadout.innerText = `Playhead: ${Math.round(ms)} ms`;
-      redrawSelected(ms);
-    });
+    tick();
 
     // ----------------------------
     // Keyboard shortcuts
     // ----------------------------
-    function handleKeyDown(e) {
-      if (isTextInputTarget(e.target)) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
+    window.addEventListener("keydown", (ev) => {
+      if (isTextInputTarget(ev.target)) return;
+      if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
 
-      const key = e.key.toLowerCase();
+      const key = ev.key.toLowerCase();
 
-      if (key === " " || e.code === "Space" || key === "enter") {
-        e.preventDefault();
-        if (!isPlaying) doPlay().catch(console.error);
-        else doStop();
+      if (key === " " || ev.code === "Space" || key === "enter") {
+        ev.preventDefault();
+        if (!isPlayingUI) playFromBeginning().catch(console.error);
+        else stopNow();
       } else if (key === "escape" || key === "esc") {
-        e.preventDefault();
-        doStop();
+        ev.preventDefault();
+        stopNow();
       } else if (key === "l") {
-        e.preventDefault();
-        ui.loopToggle.checked = !ui.loopToggle.checked;
-        pLoop.value = ui.loopToggle.checked ? 1 : 0;
+        ev.preventDefault();
+        ui.btnLoop.click();
       } else if (key === "arrowdown") {
-        e.preventDefault();
-        selectByIndex(getSelectedIndex() + 1).catch(console.error);
+        ev.preventDefault();
+        selectByIndex(selectedIdx + 1).catch(console.error);
       } else if (key === "arrowup") {
-        e.preventDefault();
-        selectByIndex(getSelectedIndex() - 1).catch(console.error);
+        ev.preventDefault();
+        selectByIndex(selectedIdx - 1).catch(console.error);
       }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-
-    // Initial load
-    await loadSelectedIntoRNBO();
+    });
   }
 
   window.initPlaylistUI = initPlaylistUI;
