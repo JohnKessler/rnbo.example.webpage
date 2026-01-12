@@ -1,12 +1,23 @@
 // playlist-ui.js
-// RNBO Playlist UI (Web Export) — Reframe-integrated baseline
+// RNBO Playlist UI — stable core behavior + Penpot-driven styling
+// Version: v1.12 (2026-01-11)
 //
-// Updates in this version:
-// - Keeps all known-good functionality: preload, waveform thumbnails, playhead drawing, EOF stop logic,
-//   drag reorder + persistence, keyboard shortcuts, touch-friendly interactions, volume via outGain.
-// - "Prime audio" on first Play so AudioContext resumes + RNBO node is connected.
-// - Layout: fixed top controls/header region; only the playlist rows scroll.
-// - PREMIUM: header separation reacts to scroll position + scroll velocity (subtle shadow/fade).
+// Intent of v1.12:
+// - RESTORE v1.9 DOM + classnames exactly (to regain correct header styling).
+// - Keep v1.9’s stable UI/playhead/timebase behavior.
+// - Apply surgical v1.11 updates ONLY for jumpto correctness + reverse-start reliability.
+//   * Your patch jumpto range: 0..600000 ms (treated as milliseconds, not normalized).
+//   * Reverse start: when rate < 0, we always jump near the end via jumpto (if available)
+//     before playTrig, regardless of loop state.
+//
+// Expected RNBO parameters (by id):
+//   clipIndex, rate, loop, playTrig, stopTrig, outGain
+// Optional RNBO parameter (by id):
+//   jumpto (ms; patch range 0..600000)
+// Expected RNBO external buffer name:
+//   "sample"
+// Expected port message tag (outport):
+//   "playhead" with ms as payload[0]
 
 (function () {
   "use strict";
@@ -15,23 +26,30 @@
   // Config
   // ----------------------------
   const MEDIA_BASE = "export/media/";
-  const MANIFEST_URL = MEDIA_BASE + "playlist.json"; // { "items": ["a.wav","b.wav"] }
+  const MANIFEST_URL = MEDIA_BASE + "playlist.json";
+  const ORDER_KEY = "rnbo_playlist_order_v5";
 
   const WAVE_W = 520;
   const WAVE_H = 80;
 
-  const PLAYHEAD_THROTTLE_MS = 16; // ~60fps
-  const DEFAULT_OUTGAIN = 112;
+  // UI tick / playhead handling
+  const UI_THROTTLE_MS = 16;
+  const PORT_FRESH_MS = 300; // if port is stale, estimate from AudioContext time
+  const END_EPS_MS = 3; // ms epsilon for EOF detection
 
-  // Drag reorder persistence
-  const ORDER_KEY = "rnbo_playlist_order_v2";
+  // Reverse EOF handling
+  const REVERSE_EOF_GRACE_MS = 140; // grace window right after hitting play in reverse
+  const REVERSE_LOOP_ASSIST_MS = 140; // legacy assist when no jumpto exists (kept)
 
-  // Use manifest by default
-  const USE_HARDCODED_LIST = false;
-  const HARD_CODED_ITEMS = [];
+  // Preload complete fade behavior
+  const PRELOAD_FADE_DELAY_MS = 350;
+  const PRELOAD_FADE_DURATION_MS = 900;
 
-  // Let the website/theme CSS control appearance
-  const INJECT_DEFAULT_STYLES = false;
+  // Patch-specific jumpto max (ms). We still prefer reading the declared param max at runtime.
+  const JUMPTO_FALLBACK_MAX_MS = 600000;
+
+  // Preferred default output gain (matches your patch init)
+  const DEFAULT_OUTGAIN = 120;
 
   // ----------------------------
   // Helpers
@@ -43,49 +61,49 @@
   }
 
   function ensureParam(device, id) {
-    const p = device.parametersById?.get(id) || device.parameters.find(pp => pp.id === id);
+    const p =
+      device.parametersById?.get(id) ||
+      (device.parameters || []).find((pp) => pp.id === id);
     if (!p) throw new Error(`Missing RNBO parameter id="${id}"`);
     return p;
   }
 
   function pulseParam(param, ms = 20) {
-    param.value = 1;
-    setTimeout(() => { param.value = 0; }, ms);
+    try {
+      param.value = 1;
+      setTimeout(() => {
+        try {
+          param.value = 0;
+        } catch (_) {}
+      }, ms);
+    } catch (_) {}
   }
 
   async function fetchJSON(url) {
     const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) throw new Error(`Failed to fetch ${url} (${r.status})`);
+    if (!r.ok) throw new Error(`Failed to fetch ${url}`);
     return r.json();
   }
 
   async function fetchArrayBuffer(url) {
     const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) throw new Error(`Failed to fetch ${url} (${r.status})`);
+    if (!r.ok) throw new Error(`Failed to fetch ${url}`);
     return r.arrayBuffer();
   }
 
   function saveOrder(names) {
-    try { localStorage.setItem(ORDER_KEY, JSON.stringify(names)); } catch (_) {}
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+    } catch (_) {}
   }
 
   function loadOrder() {
     try {
       const raw = localStorage.getItem(ORDER_KEY);
-      if (!raw) return null;
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : null;
+      return raw ? JSON.parse(raw) : null;
     } catch (_) {
       return null;
     }
-  }
-
-  function applySavedOrder(original, saved) {
-    const oSet = new Set(original);
-    const sSet = new Set(saved);
-    if (oSet.size !== sSet.size) return original;
-    for (const f of oSet) if (!sSet.has(f)) return original;
-    return saved.slice();
   }
 
   function isTextInputTarget(t) {
@@ -94,59 +112,53 @@
     return tag === "input" || tag === "textarea" || t.isContentEditable;
   }
 
-  // Safe element creator (dataset handling)
   function createEl(tag, props = {}, children = []) {
     const el = document.createElement(tag);
 
-    if (props.dataset && typeof props.dataset === "object") {
-      for (const [k, v] of Object.entries(props.dataset)) {
-        el.dataset[k] = String(v);
-      }
+    if (props.dataset) {
+      Object.entries(props.dataset).forEach(([k, v]) => (el.dataset[k] = v));
       delete props.dataset;
     }
 
-    if (props.style && typeof props.style === "object") {
-      Object.assign(el.style, props.style);
-      delete props.style;
+    if (props.ariaLabel) {
+      el.setAttribute("aria-label", props.ariaLabel);
+      delete props.ariaLabel;
     }
 
     Object.assign(el, props);
-    for (const c of children) el.appendChild(c);
+    children.forEach((c) => el.appendChild(c));
     return el;
   }
 
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function msToTime(ms) {
+    const t = Math.max(0, Math.floor(ms));
+    const sec = Math.floor(t / 1000);
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
   // ----------------------------
-  // PREMIUM: scroll-reactive header separation
+  // Premium header effects (kept)
   // ----------------------------
   function installPremiumHeaderEffects(topEl, scrollEl) {
     if (!topEl || !scrollEl) return;
-
-    // Respect reduced motion
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
 
     let lastTop = scrollEl.scrollTop || 0;
     let lastT = performance.now();
     let rafPending = false;
 
     function setSep(intensity01, vel01) {
-      // intensity01: 0..1 (based on scrollTop > 0)
-      // vel01: 0..1 (based on scrolling speed)
-
-      // Base depth when scrolled, plus a little extra when moving fast
       const sep = clamp01(intensity01);
+      const v = clamp01(vel01);
 
-      // Shadow opacities (subtle)
-      const aBase = 0.22 * sep;
-      const bBase = 0.14 * sep;
-
-      // Velocity adds a tiny punch (still tasteful)
-      const punch = reduceMotion ? 0 : (0.12 * vel01 * sep);
-
-      const shadowA = clamp01(aBase + punch);
-      const shadowB = clamp01(bBase + (punch * 0.7));
-
-      // Fade strength
-      const fadeStart = clamp01((0.70 * sep) + (0.20 * vel01 * sep));
+      const shadowA = sep * (0.22 + 0.12 * v);
+      const shadowB = sep * (0.16 + 0.08 * v);
+      const fadeStart = sep * (0.75 + 0.2 * v);
 
       topEl.style.setProperty("--sep", String(sep));
       topEl.style.setProperty("--shadowA", shadowA.toFixed(3));
@@ -162,16 +174,10 @@
 
       const dt = Math.max(8, now - lastT);
       const dy = st - lastTop;
-
-      // px/s
       const vel = Math.abs(dy) / (dt / 1000);
-
-      // Map velocity to 0..1 (0–1800px/s is the useful range)
       const vel01 = clamp01(vel / 1800);
 
-      // Presence: only after you’re not at the very top
-      const intensity01 = st > 2 ? 1 : (st > 0 ? 0.35 : 0);
-
+      const intensity01 = st > 2 ? 1 : st > 0 ? 0.35 : 0;
       setSep(intensity01, vel01);
 
       lastTop = st;
@@ -185,24 +191,23 @@
     }
 
     scrollEl.addEventListener("scroll", onScroll, { passive: true });
-
-    // Initialize state
     setSep((scrollEl.scrollTop || 0) > 2 ? 1 : 0, 0);
   }
 
   // ----------------------------
-  // Waveform
+  // Waveform drawing
   // ----------------------------
   function buildPeaks(audioBuffer, width) {
-    const ch0 = audioBuffer.getChannelData(0); // mono sources
+    const ch0 = audioBuffer.getChannelData(0);
     const len = ch0.length;
     const spp = Math.max(1, Math.floor(len / width));
     const peaks = new Float32Array(width * 2);
 
     for (let x = 0; x < width; x++) {
-      let min = 1.0, max = -1.0;
+      let min = 1,
+        max = -1;
       const start = x * spp;
-      const end = Math.min(len, start + spp);
+      const end = Math.min(len, (x + 1) * spp);
       for (let i = start; i < end; i++) {
         const v = ch0[i];
         if (v < min) min = v;
@@ -214,20 +219,12 @@
     return peaks;
   }
 
-  function drawWaveform(canvas, peaks, playhead01) {
+  function drawWaveform(canvas, peaks, playheadFracOrNull) {
     const ctx = canvas.getContext("2d");
     const w = canvas.width;
     const h = canvas.height;
 
     ctx.clearRect(0, 0, w, h);
-
-    // center line
-    ctx.globalAlpha = 0.22;
-    ctx.beginPath();
-    ctx.moveTo(0, h / 2);
-    ctx.lineTo(w, h / 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
 
     // waveform
     ctx.beginPath();
@@ -241,587 +238,818 @@
     }
     ctx.stroke();
 
-    // playhead
-    if (playhead01 != null) {
-      const x = Math.round(clamp01(playhead01) * (w - 1)) + 0.5;
-      ctx.globalAlpha = 0.95;
+    // playhead overlay
+    if (playheadFracOrNull != null) {
+      const frac = clamp01(playheadFracOrNull);
+      const x = frac * w;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
       ctx.stroke();
-      ctx.globalAlpha = 1;
     }
   }
 
   // ----------------------------
-  // Styles (disabled by default)
+  // Icons (kept)
   // ----------------------------
-  function injectStyleOnce() {
-    if (!INJECT_DEFAULT_STYLES) return;
-    if (document.getElementById("rnbo-playlist-style")) return;
+  const ICON_PLAY =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+  const ICON_STOP =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="7" y="7" width="10" height="10"/></svg>';
+  const ICON_LOOP =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M17 1l4 4-4 4V6H7a4 4 0 0 0 0 8h1v2H7a6 6 0 0 1 0-12h10V1zM7 23l-4-4 4-4v3h10a4 4 0 0 0 0-8h-1V8h1a6 6 0 0 1 0 12H7v3z"/></svg>';
 
-    const style = document.createElement("style");
-    style.id = "rnbo-playlist-style";
-    style.textContent = `
-      #playlist-ui { max-width: 920px; margin: 14px auto; padding: 12px; border: 1px solid rgba(0,0,0,0.15); border-radius: 14px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-      .rnbo-title { font-weight: 800; font-size: 16px; margin-bottom: 10px; }
-      .rnbo-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-      .rnbo-btn { padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.2); background: transparent; cursor: pointer; min-height: 44px; }
-      .rnbo-label { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; }
-      .rnbo-slider { width: 220px; height: 26px; }
-      .rnbo-readout { font-variant-numeric: tabular-nums; opacity: 0.85; }
-      .rnbo-progress { width: 100%; }
-      .rnbo-list { margin-top: 12px; display: grid; grid-template-columns: 1fr; gap: 10px; }
-      .rnbo-row { padding: 12px; border-radius: 14px; border: 1px solid rgba(0,0,0,0.12); cursor: pointer; user-select: none; }
-      .rnbo-row.selected { border: 2px solid rgba(0,0,0,0.45); }
-      .rnbo-row.dragging { opacity: 0.85; border-style: dashed; }
-      .rnbo-row-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
-      .rnbo-row-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-      .rnbo-handle { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid rgba(0,0,0,0.14); cursor: grab; touch-action: none; flex: 0 0 auto; }
-      .rnbo-filename { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 520px; }
-      .rnbo-meta { font-size: 12px; opacity: 0.7; white-space: nowrap; }
-      .rnbo-canvas { display: block; width: 100%; border-radius: 10px; border: 1px solid rgba(0,0,0,0.12); }
-      .rnbo-iconbtn { width: 56px; height: 56px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(0,0,0,0.2); background: transparent; cursor: pointer; }
-    `;
-    document.head.appendChild(style);
+  function iconSVG(svgStr) {
+    const wrap = document.createElement("span");
+    wrap.className = "rnbo-icon";
+    wrap.innerHTML = svgStr;
+    return wrap;
   }
 
   // ----------------------------
-  // UI creation (fixed top region + scrolling list region)
+  // UI Build (v1.9 structure / class names — DO NOT TOUCH)
   // ----------------------------
   function buildUI() {
-    injectStyleOnce();
-
-    let root = document.getElementById("playlist-ui");
-    if (!root) {
-      root = document.createElement("div");
-      root.id = "playlist-ui";
-      document.body.appendChild(root);
-    }
+    const root = document.getElementById("playlist-ui");
+    if (!root) throw new Error('Missing #playlist-ui container in playlist.html');
 
     const top = createEl("div", { className: "rnbo-top" });
     const scroll = createEl("div", { className: "rnbo-scroll" });
-
-    const title = createEl("div", { className: "rnbo-title", innerText: "Playlist" });
-
-    const progressLabel = createEl("div", { className: "rnbo-readout", innerText: "Preload: 0%" });
-    const progress = createEl("progress", { className: "rnbo-progress", value: 0, max: 1 });
-
-    const btnPlay = createEl("button", {
-      className: "icon-button rnbo-iconbtn rnbo-play",
-      type: "button",
-      title: "Play",
-      ariaLabel: "Play"
-    }, [playIconSVG()]);
-
-    const btnStop = createEl("button", {
-      className: "icon-button rnbo-iconbtn rnbo-stop",
-      type: "button",
-      title: "Stop",
-      ariaLabel: "Stop"
-    }, [stopIconSVG()]);
-
-    const loopToggle = createEl("input", { type: "checkbox" });
-    const loopLabel = createEl("label", { className: "rnbo-label" }, [
-      loopToggle,
-      createEl("span", { innerText: "Loop" })
-    ]);
-
-    const rate = createEl("input", { className: "rnbo-slider", type: "range", min: -1, max: 2, step: 0.01, value: 1 });
-    const rateVal = createEl("span", { className: "rnbo-readout", innerText: "1.00x" });
-    const rateLabel = createEl("label", { className: "rnbo-label" }, [
-      createEl("span", { innerText: "Speed" }),
-      rate,
-      rateVal
-    ]);
-
-    const vol = createEl("input", { className: "rnbo-slider", type: "range", min: 0, max: 158, step: 1, value: DEFAULT_OUTGAIN });
-    const volVal = createEl("span", { className: "rnbo-readout", innerText: String(DEFAULT_OUTGAIN) });
-    const volLabel = createEl("label", { className: "rnbo-label" }, [
-      createEl("span", { innerText: "Volume" }),
-      vol,
-      volVal
-    ]);
-
-    const controls = createEl("div", { className: "rnbo-controls" }, [
-      btnPlay, btnStop, loopLabel, rateLabel, volLabel
-    ]);
-
-    const playheadReadout = createEl("div", { className: "rnbo-readout", innerText: "Playhead: 0 ms" });
-
-    const hint = createEl("div", {
-      className: "rnbo-hint rnbo-readout",
-      innerText: "Shortcuts: Space play/stop · Arrows prev/next · Enter play · Esc stop · L loop · Drag ☰ to reorder"
-    });
-
     const list = createEl("div", { className: "rnbo-list" });
 
-    root.innerHTML = "";
-    top.appendChild(title);
-    top.appendChild(progressLabel);
-    top.appendChild(progress);
-    top.appendChild(controls);
-    top.appendChild(playheadReadout);
-    top.appendChild(hint);
+    // Title + preload line
+    const title = createEl("div", { className: "rnbo-title", innerText: "Playlist" });
+    const preload = createEl("div", { className: "rnbo-preload", innerText: "Preload: 0%" });
+    const titleStack = createEl("div", { className: "rnbo-title-stack" }, [title, preload]);
+
+    // Transport row
+    const btnPlay = createEl(
+      "button",
+      { className: "rnbo-btn rnbo-iconbtn rnbo-play", type: "button", title: "Play", ariaLabel: "Play" },
+      [iconSVG(ICON_PLAY)]
+    );
+    const btnStop = createEl(
+      "button",
+      { className: "rnbo-btn rnbo-iconbtn rnbo-stop", type: "button", title: "Stop", ariaLabel: "Stop" },
+      [iconSVG(ICON_STOP)]
+    );
+    const btnLoop = createEl(
+      "button",
+      { className: "rnbo-btn rnbo-iconbtn rnbo-loop", type: "button", title: "Loop", ariaLabel: "Loop" },
+      [iconSVG(ICON_LOOP)]
+    );
+    const transportLeft = createEl("div", { className: "transport-left" }, [btnPlay, btnStop, btnLoop]);
+
+    const rate = createEl("input", {
+      className: "rnbo-slider rnbo-rate-slider",
+      type: "range",
+      min: -1,
+      max: 2,
+      step: 0.01,
+      value: 1,
+      ariaLabel: "Rate",
+    });
+    const rateVal = createEl("span", { className: "rnbo-readout rnbo-rate-val", innerText: "1.00×" });
+    const rateWrap = createEl("div", { className: "transport-rate" }, [rate, rateVal]);
+
+    const vol = createEl("input", {
+      className: "rnbo-slider rnbo-vol-slider",
+      type: "range",
+      min: 0,
+      max: 158,
+      step: 1,
+      value: DEFAULT_OUTGAIN,
+      ariaLabel: "Volume",
+    });
+    const volVal = createEl("span", { className: "rnbo-readout rnbo-vol-val", innerText: String(DEFAULT_OUTGAIN) });
+    const volLabel = createEl("span", { className: "rnbo-vol-label", innerText: "VOL" });
+    const volWrap = createEl("div", { className: "transport-vol" }, [volLabel, vol, volVal]);
+
+    const transport = createEl("div", { className: "header-row-transport" }, [transportLeft, rateWrap, volWrap]);
+
+    // Progress row
+    const progressFill = createEl("div", { className: "progress-fill" });
+    const progressHandle = createEl("div", { className: "progress-handle" });
+    const progressTrack = createEl("div", { className: "progress-track" }, [progressFill, progressHandle]);
+
+    const timeElapsed = createEl("div", { className: "time-elapsed", innerText: "0:00" });
+    const timeRemaining = createEl("div", { className: "time-remaining", innerText: "-0:00" });
+    const timeRow = createEl("div", { className: "time-row" }, [timeElapsed, timeRemaining]);
+
+    const progressRow = createEl("div", { className: "header-row-progress" }, [progressTrack, timeRow]);
+
+    // Status badge
+    const statusText = createEl("div", { className: "status-text", innerText: "Ready" });
+    const statusBadge = createEl("div", { className: "rnbo-status" }, [statusText]);
+
+    top.appendChild(titleStack);
+    top.appendChild(statusBadge);
+    top.appendChild(transport);
+    top.appendChild(progressRow);
 
     scroll.appendChild(list);
+    root.replaceChildren(top, scroll);
 
-    root.appendChild(top);
-    root.appendChild(scroll);
-
-    // Install premium effects now that elements exist
     installPremiumHeaderEffects(top, scroll);
 
     return {
       root,
       top,
       scroll,
-      progress,
-      progressLabel,
+      list,
+
       btnPlay,
       btnStop,
-      loopToggle,
+      btnLoop,
+
       rate,
       rateVal,
       vol,
       volVal,
-      playheadReadout,
-      list
+
+      preloadText: titleStack.querySelector(".rnbo-preload"),
+      statusText: statusBadge.querySelector(".status-text"),
+
+      progressTrack,
+      progressFill: progressTrack.querySelector(".progress-fill"),
+      progressHandle: progressTrack.querySelector(".progress-handle"),
+      timeElapsed: timeRow.querySelector(".time-elapsed"),
+      timeRemaining: timeRow.querySelector(".time-remaining"),
     };
   }
 
-  // Simple inline SVG icons (inherit currentColor)
-  function playIconSVG() {
-    return createEl("span", { className: "rnbo-icon" }, [
-      svgEl("svg", { viewBox: "0 0 24 24", width: "20", height: "20", ariaHidden: "true" }, [
-        svgEl("path", { d: "M8 5v14l11-7z", fill: "currentColor" })
-      ])
-    ]);
-  }
-
-  function stopIconSVG() {
-    return createEl("span", { className: "rnbo-icon" }, [
-      svgEl("svg", { viewBox: "0 0 24 24", width: "18", height: "18", ariaHidden: "true" }, [
-        svgEl("rect", { x: "7", y: "7", width: "10", height: "10", fill: "currentColor" })
-      ])
-    ]);
-  }
-
-  function svgEl(tag, attrs, children = []) {
-    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (k === "ariaHidden") el.setAttribute("aria-hidden", String(v));
-      else el.setAttribute(k, String(v));
-    }
-    for (const c of children) el.appendChild(c);
-    return el;
-  }
-
   // ----------------------------
-  // Main init (called by app.js)
+  // Init
   // ----------------------------
   async function initPlaylistUI(device, context) {
     const ui = buildUI();
 
-    // RNBO param bindings
+    // RNBO params
     const pClipIndex = ensureParam(device, "clipIndex");
     const pRate = ensureParam(device, "rate");
     const pLoop = ensureParam(device, "loop");
     const pPlayTrig = ensureParam(device, "playTrig");
     const pStopTrig = ensureParam(device, "stopTrig");
     const pOutGain = ensureParam(device, "outGain");
+    const pJumpTo =
+      (device.parametersById?.get("jumpto") || (device.parameters || []).find((p) => p.id === "jumpto")) || null;
 
-    // ----------------------------
-    // PRIME AUDIO
-    // ----------------------------
-    let audioPrimed = false;
     async function primeAudio() {
-      if (audioPrimed) return;
+      try {
+        if (context && context.state !== "running") await context.resume();
+      } catch (_) {}
+    }
 
-      if (context && context.state !== "running") {
-        await context.resume();
-      }
+    // Optional jumpto support (ms). With your patch, declared max is 600000 and we treat it as ms.
+    function supportsJumpTo() {
+      return !!pJumpTo && typeof pJumpTo.value === "number";
+    }
+
+    function getParamMinMax(param) {
+      // RNBO builds vary; support multiple property names.
+      const min = Number(param.minimum ?? param.min ?? param.minimumValue ?? param.minimum_value);
+      const max = Number(param.maximum ?? param.max ?? param.maximumValue ?? param.maximum_value);
+      return {
+        min: Number.isFinite(min) ? min : 0,
+        max: Number.isFinite(max) ? max : NaN,
+      };
+    }
+
+    function setJumpToMs(targetMs, itemDurationMs) {
+      if (!supportsJumpTo()) return false;
+
+      const dur = Math.max(0, Number(itemDurationMs) || 0);
+
+      let ms = Number(targetMs);
+      if (!Number.isFinite(ms)) ms = 0;
+
+      // clamp to patch-declared range if available; otherwise use fallback
+      const r = getParamMinMax(pJumpTo);
+      const minMs = Number.isFinite(r.min) ? r.min : 0;
+      const maxMs = Number.isFinite(r.max) ? r.max : JUMPTO_FALLBACK_MAX_MS;
+
+      // With your current patch: 0..600000 => treat as ms.
+      ms = Math.max(minMs, Math.min(maxMs, ms));
+
+      // clamp to item duration and avoid exactly "dur" (use dur-1) for reverse-start stability
+      if (dur > 1) ms = Math.max(0, Math.min(ms, Math.floor(dur - 1)));
+      else ms = Math.max(0, ms);
 
       try {
-        if (device?.node && context?.destination) {
-          device.node.connect(context.destination);
-        }
+        pJumpTo.value = ms;
+        return true;
+      } catch (e) {
+        console.warn("Failed to set jumpto:", e);
+        return false;
+      }
+    }
+
+    // Bind RATE to RNBO param range (patch: -1..2)
+    {
+      const r = getParamMinMax(pRate);
+      const rateMin = Number.isFinite(r.min) ? r.min : -1;
+      const rateMax = Number.isFinite(r.max) ? r.max : 2;
+
+      ui.rate.min = String(rateMin);
+      ui.rate.max = String(rateMax);
+      ui.rate.step = "0.01";
+
+      ui.rate.value = String(Number.isFinite(pRate.value) ? pRate.value : 1);
+      ui.rateVal.innerText = `${Number(ui.rate.value).toFixed(2)}×`;
+
+      ui.rate.addEventListener("input", () => {
+        const v = Number(ui.rate.value);
+        try {
+          pRate.value = v;
+        } catch (_) {}
+        ui.rateVal.innerText = `${v.toFixed(2)}×`;
+      });
+    }
+
+    // Bind VOL to RNBO param range (patch: 0..158, init 120)
+    {
+      const r = getParamMinMax(pOutGain);
+      const outMin = Number.isFinite(r.min) ? r.min : 0;
+      const outMax = Number.isFinite(r.max) ? r.max : 158;
+
+      ui.vol.min = String(outMin);
+      ui.vol.max = String(outMax);
+      ui.vol.step = "1";
+
+      const init = Number.isFinite(pOutGain.value) ? Number(pOutGain.value) : DEFAULT_OUTGAIN;
+      const initialOut = Math.max(outMin, Math.min(outMax, init));
+
+      ui.vol.value = String(initialOut);
+      ui.volVal.innerText = String(Math.round(initialOut));
+
+      try {
+        // Ensure RNBO isn't stuck at 0 (silent) until user touches the slider.
+        pOutGain.value = Number(initialOut);
       } catch (_) {}
 
-      audioPrimed = true;
+      ui.vol.addEventListener("input", () => {
+        const v = Math.round(Number(ui.vol.value));
+        try {
+          pOutGain.value = v;
+        } catch (_) {}
+        ui.volVal.innerText = String(v);
+      });
     }
 
-    // Playback / playhead state
-    let isPlaying = false;
-    let endedAndStopped = false;
-    let lastPlayheadMs = 0;
-
-    // Load manifest
-    let filenames = [];
-    if (USE_HARDCODED_LIST) {
-      filenames = HARD_CODED_ITEMS.slice();
-    } else {
-      const manifest = await fetchJSON(MANIFEST_URL);
-      filenames = Array.isArray(manifest.items) ? manifest.items : [];
+    function setProgress(frac01) {
+      const f = clamp01(frac01);
+      ui.progressFill.style.width = `${f * 100}%`;
+      ui.progressHandle.style.left = `${f * 100}%`;
     }
 
-    if (!filenames.length) {
-      ui.progressLabel.innerText = "No playlist items found.";
-      return;
+    function setTime(elapsedMs, totalMs) {
+      ui.timeElapsed.innerText = msToTime(elapsedMs);
+      const remaining = Math.max(0, totalMs - elapsedMs);
+      ui.timeRemaining.innerText = `-${msToTime(remaining)}`;
     }
 
-    // Apply saved order if compatible
+    // Load manifest + order
+    const manifest = await fetchJSON(MANIFEST_URL);
+    const filenames = manifest.items || [];
+
     const saved = loadOrder();
-    if (saved) filenames = applySavedOrder(filenames, saved);
+    let ordered = filenames.slice();
+    if (Array.isArray(saved) && saved.length) {
+      const set = new Set(saved);
+      const kept = saved.filter((n) => filenames.includes(n));
+      const missing = filenames.filter((n) => !set.has(n));
+      ordered = kept.concat(missing);
+    }
 
-    // Preload
-    ui.progress.value = 0;
-    ui.progressLabel.innerText = `Preload: 0% (0/${filenames.length})`;
-
+    // Decode + peaks
     const items = [];
-    for (let i = 0; i < filenames.length; i++) {
-      const name = filenames[i];
-      const url = MEDIA_BASE + name;
-
-      const ab = await fetchArrayBuffer(url);
+    for (let i = 0; i < ordered.length; i++) {
+      const name = ordered[i];
+      const ab = await fetchArrayBuffer(MEDIA_BASE + name);
       const audioBuffer = await context.decodeAudioData(ab);
       const peaks = buildPeaks(audioBuffer, WAVE_W);
+      const durationMs = (audioBuffer.length / audioBuffer.sampleRate) * 1000;
+      items.push({ name, audioBuffer, peaks, durationMs });
 
-      items.push({
-        name,
-        url,
-        audioBuffer,
-        peaks,
-        durationMs: (audioBuffer.length / audioBuffer.sampleRate) * 1000,
-        rowEl: null,
-        canvas: null,
-        handleEl: null
-      });
-
-      const frac = (i + 1) / filenames.length;
-      ui.progress.value = frac;
-      ui.progressLabel.innerText = `Preload: ${Math.round(frac * 100)}% (${i + 1}/${filenames.length})`;
+      const frac = (i + 1) / Math.max(1, ordered.length);
+      ui.preloadText.innerText = `Preload: ${Math.round(frac * 100)}% (${i + 1}/${ordered.length})`;
     }
 
-    ui.progressLabel.innerText = `Preload complete: ${filenames.length} files`;
+    ui.preloadText.innerText = `Preload complete: ${ordered.length} files`;
+    ui.preloadText.style.setProperty("--fade-ms", `${PRELOAD_FADE_DURATION_MS}ms`);
+    setTimeout(() => ui.preloadText.classList.add("is-fading"), PRELOAD_FADE_DELAY_MS);
 
-    // Default selection
-    let selectedName = items[0]?.name || null;
+    // ----------------------------
+    // State
+    // ----------------------------
+    let selectedIdx = 0;
+    let isLoop = false;
+    let isPlayingUI = false;
 
-    function getSelectedIndex() {
-      const idx = items.findIndex(it => it.name === selectedName);
-      return idx >= 0 ? idx : 0;
-    }
+    // RNBO port playhead
+    let portPlayheadMs = 0;
+    let lastPortAt = 0;
 
-    function getSelectedItem() {
-      return items[getSelectedIndex()];
-    }
+    // Offset so we can rebase effective time when needed
+    let portOffsetMs = 0;
 
-    function redrawSelected(playheadMsOrNull) {
-      const it = getSelectedItem();
-      if (!it || !it.canvas) return;
+    // Fallback anchor (if port stalls)
+    let anchorCtxTime = 0;
+    let anchorRawMs = 0;
 
-      const frac = (playheadMsOrNull == null)
-        ? 0
-        : (it.durationMs > 0 ? (playheadMsOrNull / it.durationMs) : 0);
+    // Displayed playhead (clamped/modded)
+    let displayMs = 0;
 
-      drawWaveform(it.canvas, it.peaks, clamp01(frac));
+    // Prevent resetting repeatedly while idle
+    let didAutoResetAfterEOF = false;
+
+    // Reverse EOF grace after pressing play (prevents instant reverse-EOF at t=0)
+    let reverseEOFIgnoreUntil = 0;
+
+    function getRateNow() {
+      const v = Number(pRate.value);
+      return Number.isFinite(v) ? v : 1;
     }
 
     async function loadSelectedIntoRNBO() {
-      const idx = getSelectedIndex();
-      const it = items[idx];
-      if (!it) return;
+      try {
+        pClipIndex.value = selectedIdx;
+      } catch (_) {}
+    }
 
-      await device.setDataBuffer("sample", it.audioBuffer);
-      pClipIndex.value = idx;
+    function getEffectiveRaw() {
+      const effective = portPlayheadMs - portOffsetMs;
+      return Number.isFinite(effective) ? effective : 0;
+    }
 
-      ui.playheadReadout.innerText = "Playhead: 0 ms";
-      lastPlayheadMs = 0;
-      endedAndStopped = false;
+    function normalizeForDisplay(rawMs, totalMs) {
+      if (!Number.isFinite(rawMs) || !Number.isFinite(totalMs) || totalMs <= 0) {
+        return { display: 0, eof: false };
+      }
 
-      items.forEach((x, i2) => {
-        if (x.canvas) drawWaveform(x.canvas, x.peaks, (i2 === idx) ? 0 : null);
+      if (isLoop) {
+        const mod = rawMs % totalMs;
+        const d = mod < 0 ? mod + totalMs : mod;
+        return { display: d, eof: false };
+      }
+
+      const rateNow = getRateNow();
+      const now = performance.now();
+
+      // Reverse EOF: treat <= 0 as end, but NOT during grace window immediately after Play.
+      if (rateNow < 0) {
+        if (now >= reverseEOFIgnoreUntil && rawMs <= END_EPS_MS) {
+          return { display: 0, eof: true };
+        }
+      } else {
+        if (rawMs >= totalMs - END_EPS_MS) {
+          return { display: totalMs, eof: true };
+        }
+      }
+
+      // Clamp
+      if (rawMs < 0) rawMs = 0;
+      if (rawMs > totalMs) rawMs = totalMs;
+
+      return { display: rawMs, eof: false };
+    }
+
+    function redrawWaveforms() {
+      const it = items[selectedIdx];
+      const total = it?.durationMs || 0;
+      const frac = total > 0 ? clamp01(displayMs / total) : 0;
+
+      rowEls.forEach((row, idx) => {
+        const canvas = row.querySelector("canvas");
+        if (!canvas) return;
+        const item = items[idx];
+        if (!item) return;
+
+        if (idx === selectedIdx) drawWaveform(canvas, item.peaks, frac);
+        else drawWaveform(canvas, item.peaks, null);
       });
     }
 
-    async function selectByIndex(idx) {
-      idx = Math.max(0, Math.min(items.length - 1, idx));
-
-      if (isPlaying) {
-        pulseParam(pStopTrig);
-        isPlaying = false;
-        endedAndStopped = true;
-      }
-
-      selectedName = items[idx].name;
-      renderList();
-      await loadSelectedIntoRNBO();
+    function resetUIToStart() {
+      displayMs = 0;
+      setProgress(0);
+      setTime(0, items[selectedIdx]?.durationMs || 0);
+      redrawWaveforms();
+      didAutoResetAfterEOF = true;
     }
 
-    // ----------------------------
-    // Render + drag reorder
-    // ----------------------------
-    const dragState = { active: false, draggingName: null };
+    function paintFromRaw(rawMs) {
+      const it = items[selectedIdx];
+      if (!it) return;
 
-    function moveItem(fromIdx, toIdx) {
-      if (fromIdx === toIdx) return;
-      const [moved] = items.splice(fromIdx, 1);
-      items.splice(toIdx, 0, moved);
+      const norm = normalizeForDisplay(rawMs, it.durationMs);
+      displayMs = norm.display;
 
-      renderList();
-      saveOrder(items.map(it => it.name));
-      pClipIndex.value = getSelectedIndex();
-    }
-
-    function attachDragHandlers() {
-      items.forEach((it) => {
-        const handle = it.handleEl;
-        const row = it.rowEl;
-        if (!handle || !row) return;
-        if (handle._rnboDragAttached) return;
-        handle._rnboDragAttached = true;
-
-        handle.addEventListener("pointerdown", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          handle.setPointerCapture?.(e.pointerId);
-
-          dragState.active = true;
-          dragState.draggingName = row.dataset.name;
-          row.classList.add("dragging");
-        });
-
-        handle.addEventListener("pointermove", (e) => {
-          if (!dragState.active) return;
-
-          const el = document.elementFromPoint(e.clientX, e.clientY);
-          const overRow = el?.closest?.(".rnbo-row");
-          if (!overRow) return;
-
-          const draggingIdx = items.findIndex(x => x.name === dragState.draggingName);
-          const overName = overRow.dataset.name;
-          const overIdx = items.findIndex(x => x.name === overName);
-
-          if (draggingIdx < 0 || overIdx < 0 || draggingIdx === overIdx) return;
-          moveItem(draggingIdx, overIdx);
-        });
-
-        function endDrag() {
-          if (!dragState.active) return;
-          dragState.active = false;
-
-          const draggingIdx = items.findIndex(x => x.name === dragState.draggingName);
-          if (draggingIdx >= 0) items[draggingIdx].rowEl?.classList.remove("dragging");
-
-          dragState.draggingName = null;
+      if (norm.eof && !isLoop) {
+        if (isPlayingUI) {
+          isPlayingUI = false;
+          ui.btnPlay.classList.remove("is-on");
+          ui.statusText.innerText = "Ready";
         }
 
-        handle.addEventListener("pointerup", endDrag);
-        handle.addEventListener("pointercancel", endDrag);
-        handle.addEventListener("lostpointercapture", endDrag);
+        pulseParam(pStopTrig);
+        resetUIToStart();
+        return;
+      }
+
+      const frac = it.durationMs > 0 ? clamp01(displayMs / it.durationMs) : 0;
+      setProgress(frac);
+      setTime(displayMs, it.durationMs);
+      redrawWaveforms();
+    }
+
+    // ----------------------------
+    // Progress-bar seek (requires jumpto)
+    // ----------------------------
+    if (ui.progressTrack) {
+      let seeking = false;
+
+      function seekToFrac(frac01, startIfPlaying) {
+        const it = items[selectedIdx];
+        if (!it || !supportsJumpTo()) return;
+
+        const targetMs = clamp01(frac01) * it.durationMs;
+
+        setJumpToMs(targetMs, it.durationMs);
+
+        // Rebase effective time so UI updates instantly, even before port catches up.
+        portOffsetMs = portPlayheadMs - targetMs;
+        anchorCtxTime = context.currentTime;
+        anchorRawMs = targetMs;
+        didAutoResetAfterEOF = false;
+
+        paintFromRaw(targetMs);
+
+        if (startIfPlaying) {
+          isPlayingUI = true;
+          ui.btnPlay.classList.add("is-on");
+          ui.statusText.innerText = "Playing";
+        }
+      }
+
+      ui.progressTrack.addEventListener("pointerdown", (ev) => {
+        if (!supportsJumpTo()) return;
+        seeking = true;
+        ui.progressTrack.setPointerCapture?.(ev.pointerId);
+        const rect = ui.progressTrack.getBoundingClientRect();
+        const x = ev.clientX - rect.left;
+        const frac = rect.width > 0 ? x / rect.width : 0;
+        seekToFrac(frac, isPlayingUI);
+      });
+
+      ui.progressTrack.addEventListener("pointermove", (ev) => {
+        if (!seeking) return;
+        const rect = ui.progressTrack.getBoundingClientRect();
+        const x = ev.clientX - rect.left;
+        const frac = rect.width > 0 ? x / rect.width : 0;
+        seekToFrac(frac, isPlayingUI);
+      });
+
+      function endSeek() {
+        seeking = false;
+      }
+
+      ui.progressTrack.addEventListener("pointerup", endSeek);
+      ui.progressTrack.addEventListener("pointercancel", endSeek);
+      ui.progressTrack.addEventListener("lostpointercapture", endSeek);
+    }
+
+    // ----------------------------
+    // Render list (v1.9 structure)
+    // ----------------------------
+    const rowEls = [];
+
+    function applyRowActiveClasses() {
+      rowEls.forEach((row, idx) => {
+        row.classList.toggle("selected", idx === selectedIdx);
+        row.classList.toggle("is-active", idx === selectedIdx);
       });
     }
 
     function renderList() {
       ui.list.innerHTML = "";
-
-      const selectedIdx = getSelectedIndex();
+      rowEls.length = 0;
 
       items.forEach((it, idx) => {
-        const handle = createEl("div", { className: "rnbo-handle", innerText: "☰" });
+        const indexBadge = createEl("div", { className: "rnbo-index", innerText: pad2(idx + 1) });
 
-        const filenameEl = createEl("div", { className: "rnbo-filename", innerText: it.name });
-        const metaEl = createEl("div", { className: "rnbo-meta", innerText: `${Math.round(it.durationMs)} ms` });
+        const handle = createEl(
+          "button",
+          { className: "rnbo-handle", type: "button", ariaLabel: "Reorder", title: "Drag to reorder" },
+          [createEl("span", { innerText: "≡≡" })]
+        );
 
-        const left = createEl("div", { className: "rnbo-row-left" }, [handle, filenameEl]);
-        const header = createEl("div", { className: "rnbo-row-header" }, [left, metaEl]);
+        const leftStack = createEl("div", { className: "rnbo-left-stack" }, [indexBadge, handle]);
+
+        const title = createEl("div", { className: "rnbo-item-title", innerText: it.name });
+        const meta = createEl("div", { className: "rnbo-item-meta", innerText: msToTime(it.durationMs) });
+        const info = createEl("div", { className: "rnbo-item-info" }, [title, meta]);
+
+        const header = createEl("div", { className: "rnbo-item-header" }, [leftStack, info]);
 
         const canvas = createEl("canvas", { className: "rnbo-canvas" });
         canvas.width = WAVE_W;
         canvas.height = WAVE_H;
 
-        it.canvas = canvas;
-        it.handleEl = handle;
+        const waveformWrap = createEl("div", { className: "rnbo-waveform" }, [canvas]);
+
+        const row = createEl(
+          "div",
+          {
+            className: "rnbo-row" + (idx === selectedIdx ? " selected is-active" : ""),
+            draggable: true,
+            dataset: { idx: String(idx) },
+          },
+          [header, waveformWrap]
+        );
 
         drawWaveform(canvas, it.peaks, idx === selectedIdx ? 0 : null);
+        row.addEventListener("click", () => setSelected(idx));
 
-        const row = createEl("div", {
-          className: "rnbo-row" + (idx === selectedIdx ? " selected" : ""),
-          dataset: { name: it.name }
-        }, [header, canvas]);
+        // Drag reorder (arm drag only from handle)
+        let dragArmed = false;
 
-        row.addEventListener("click", async () => {
-          if (dragState.active) return;
-          await selectByIndex(idx);
+        handle.addEventListener("pointerdown", (ev) => {
+          ev.preventDefault();
+          dragArmed = true;
         });
 
-        it.rowEl = row;
+        row.addEventListener("dragstart", (ev) => {
+          if (!dragArmed) {
+            ev.preventDefault();
+            return;
+          }
+          row.classList.add("dragging", "is-dragging");
+          ev.dataTransfer.effectAllowed = "move";
+          ev.dataTransfer.setData("text/plain", String(idx));
+        });
+
+        row.addEventListener("dragend", () => {
+          dragArmed = false;
+          row.classList.remove("dragging", "is-dragging");
+        });
+
+        row.addEventListener("dragover", (ev) => {
+          ev.preventDefault();
+          ev.dataTransfer.dropEffect = "move";
+        });
+
+        row.addEventListener("drop", (ev) => {
+          ev.preventDefault();
+          const from = Number(ev.dataTransfer.getData("text/plain"));
+          const to = idx;
+          if (!Number.isFinite(from) || from === to) return;
+
+          const moved = items.splice(from, 1)[0];
+          items.splice(to, 0, moved);
+
+          // keep selection pointing to same item name if possible
+          const currentName = items[selectedIdx]?.name;
+          const newSel = items.findIndex((x) => x.name === currentName);
+          selectedIdx = newSel >= 0 ? newSel : 0;
+
+          saveOrder(items.map((x) => x.name));
+
+          renderList();
+          applyRowActiveClasses();
+          loadSelectedIntoRNBO().catch(console.error);
+          resetUIToStart();
+        });
+
         ui.list.appendChild(row);
+        rowEls.push(row);
       });
 
-      attachDragHandlers();
+      applyRowActiveClasses();
+    }
+
+    async function setSelected(idx) {
+      selectedIdx = Math.max(0, Math.min(items.length - 1, idx));
+
+      // stop + rearm UI state
+      isPlayingUI = false;
+      ui.btnPlay.classList.remove("is-on");
+      ui.statusText.innerText = "Ready";
+
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
+
+      didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
+
+      await loadSelectedIntoRNBO();
+      resetUIToStart();
+      applyRowActiveClasses();
     }
 
     // ----------------------------
-    // Controls
+    // Transport
     // ----------------------------
-    async function doPlay() {
-      endedAndStopped = false;
+    async function playFromBeginning() {
       await primeAudio();
-      isPlaying = true;
+
+      // Always re-arm: stop first, reset our timebase, then play.
+      pulseParam(pStopTrig);
+
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
+
+      didAutoResetAfterEOF = false;
+
+      // Reverse grace window: don't instantly treat raw=0 as EOF
+      reverseEOFIgnoreUntil = getRateNow() < 0 ? performance.now() + REVERSE_EOF_GRACE_MS : 0;
+
+      resetUIToStart();
+
+      // v1.12: Reverse-start reliability using jumpto (v1.11 logic), without changing DOM.
+      // If jumpto exists, explicitly set the starting playhead position so Play is deterministic,
+      // especially for reverse playback (rate < 0). Do this regardless of loop state.
+      const it = items[selectedIdx];
+      const dur = it?.durationMs || 0;
+
+      const rateNow = getRateNow();
+      if (it && supportsJumpTo() && dur > 0) {
+        const startMs = rateNow < 0 ? Math.max(0, dur - 1) : 0;
+        setJumpToMs(startMs, dur);
+
+        // Rebase so UI doesn't wait for port to catch up
+        portOffsetMs = portPlayheadMs - startMs;
+        anchorCtxTime = context.currentTime;
+        anchorRawMs = startMs;
+        didAutoResetAfterEOF = false;
+      }
+
+      isPlayingUI = true;
+      ui.btnPlay.classList.add("is-on");
+      ui.statusText.innerText = "Playing";
+
+      // Legacy reverse-start assist (only when NO jumpto and loop is OFF)
+      if (rateNow < 0 && !isLoop && !supportsJumpTo()) {
+        try {
+          pLoop.value = 1; // do NOT change UI button state
+          pulseParam(pPlayTrig);
+
+          setTimeout(() => {
+            try {
+              pLoop.value = 0;
+            } catch (_) {}
+          }, REVERSE_LOOP_ASSIST_MS);
+
+          return;
+        } catch (err) {
+          console.warn("Reverse loop-assist failed; falling back to normal play.", err);
+        }
+      }
+
       pulseParam(pPlayTrig);
     }
 
-    function doStop() {
+    function stopNow() {
       pulseParam(pStopTrig);
-      isPlaying = false;
-      endedAndStopped = true;
-      lastPlayheadMs = 0;
-      ui.playheadReadout.innerText = "Playhead: 0 ms";
-      redrawSelected(0);
+
+      isPlayingUI = false;
+      ui.btnPlay.classList.remove("is-on");
+      ui.statusText.innerText = "Ready";
+
+      portPlayheadMs = 0;
+      lastPortAt = 0;
+      portOffsetMs = 0;
+
+      anchorCtxTime = context.currentTime;
+      anchorRawMs = 0;
+
+      didAutoResetAfterEOF = false;
+      reverseEOFIgnoreUntil = 0;
+
+      // If available, force jumpto back to 0 so the next Play is always from the beginning.
+      const it = items[selectedIdx];
+      if (it && supportsJumpTo() && it.durationMs > 0) {
+        setJumpToMs(0, it.durationMs);
+        portOffsetMs = portPlayheadMs - 0;
+        anchorCtxTime = context.currentTime;
+        anchorRawMs = 0;
+      }
+
+      resetUIToStart();
     }
 
-    ui.btnPlay.addEventListener("click", () => { doPlay().catch(console.error); });
-    ui.btnStop.addEventListener("click", doStop);
-
-    ui.loopToggle.addEventListener("change", () => {
-      pLoop.value = ui.loopToggle.checked ? 1 : 0;
-      if (ui.loopToggle.checked) endedAndStopped = false;
+    ui.btnPlay.addEventListener("click", () => {
+      playFromBeginning().catch(console.error);
     });
 
-    ui.rate.addEventListener("input", () => {
-      const v = parseFloat(ui.rate.value);
-      pRate.value = v;
-      ui.rateVal.innerText = `${v.toFixed(2)}x`;
+    ui.btnStop.addEventListener("click", () => {
+      stopNow();
     });
 
-    ui.vol.addEventListener("input", () => {
-      const v = Math.round(parseFloat(ui.vol.value));
-      pOutGain.value = v;
-      ui.volVal.innerText = String(v);
+    ui.btnLoop.addEventListener("click", () => {
+      const wasLoop = isLoop;
+      isLoop = !isLoop;
+
+      try {
+        pLoop.value = isLoop ? 1 : 0;
+      } catch (_) {}
+      ui.btnLoop.classList.toggle("is-on", isLoop);
+
+      // If turning LOOP OFF mid-play, rebase effective time to prevent jump-to-EOF.
+      if (wasLoop && !isLoop) {
+        const nowPortRaw = portPlayheadMs;
+        const desiredEffective = displayMs;
+        portOffsetMs = nowPortRaw - desiredEffective;
+
+        anchorCtxTime = context.currentTime;
+        anchorRawMs = desiredEffective;
+
+        paintFromRaw(desiredEffective);
+        return;
+      }
+
+      paintFromRaw(getEffectiveRaw());
     });
 
-    // Default gain
-    pOutGain.value = DEFAULT_OUTGAIN;
-    ui.vol.value = String(DEFAULT_OUTGAIN);
-    ui.volVal.innerText = String(DEFAULT_OUTGAIN);
+    // Keyboard shortcuts (v1.9 behavior)
+    window.addEventListener("keydown", (ev) => {
+      if (isTextInputTarget(ev.target)) return;
 
-    // Sync initial UI from RNBO params for rate/loop
-    ui.rate.value = String(pRate.value ?? 1);
-    ui.rateVal.innerText = `${(pRate.value ?? 1).toFixed(2)}x`;
-    ui.loopToggle.checked = (pLoop.value ?? 0) >= 0.5;
+      if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        setSelected(selectedIdx + 1).catch(console.error);
+      } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        setSelected(selectedIdx - 1).catch(console.error);
+      } else if (ev.key === " " || ev.code === "Space") {
+        ev.preventDefault();
+        playFromBeginning().catch(console.error);
+      } else if (ev.key.toLowerCase() === "s" || ev.key === "Escape") {
+        ev.preventDefault();
+        stopNow();
+      } else if (ev.key.toLowerCase() === "l") {
+        ev.preventDefault();
+        ui.btnLoop.click();
+      }
+    });
 
     // ----------------------------
-    // Playhead subscriber
+    // RNBO playhead outport + fallback
     // ----------------------------
-    let lastPaint = 0;
-    device.messageEvent.subscribe((ev) => {
-      if (!ev || ev.tag !== "playhead") return;
+    if (device.messageEvent?.subscribe) {
+      device.messageEvent.subscribe((ev) => {
+        if (!ev || ev.tag !== "playhead") return;
+        const payload = ev.payload || [];
+        const v = Number(payload[0]);
+        if (!Number.isFinite(v)) return;
 
-      const ms = Array.isArray(ev.payload) ? (ev.payload[0] ?? 0) : ev.payload;
+        portPlayheadMs = v;
+        lastPortAt = performance.now();
+
+        // Sync fallback anchor to effective time
+        anchorCtxTime = context.currentTime;
+        anchorRawMs = getEffectiveRaw();
+      });
+    }
+
+    // UI tick loop
+    let lastPaintAt = 0;
+
+    function tick() {
       const now = performance.now();
 
-      if (ms > lastPlayheadMs + 1) {
-        isPlaying = true;
-        endedAndStopped = false;
+      if (isPlayingUI) {
+        const portFresh = now - lastPortAt < PORT_FRESH_MS;
+
+        if (!portFresh) {
+          const elapsedSec = Math.max(0, context.currentTime - anchorCtxTime);
+          const rateNow = getRateNow() || 1;
+          const estRaw = anchorRawMs + elapsedSec * 1000 * rateNow;
+          paintFromRaw(estRaw);
+        } else {
+          paintFromRaw(getEffectiveRaw());
+        }
+      } else {
+        if (!didAutoResetAfterEOF) paintFromRaw(0);
       }
 
-      const loopOn = (pLoop.value ?? 0) >= 0.5;
-
-      if (!loopOn && !endedAndStopped && ms <= 0 && lastPlayheadMs > 0) {
-        pulseParam(pStopTrig);
-        isPlaying = false;
-        endedAndStopped = true;
-
-        ui.playheadReadout.innerText = "Playhead: 0 ms";
-        redrawSelected(0);
-        lastPlayheadMs = 0;
-        return;
-      }
-
-      lastPlayheadMs = ms;
-
-      if (!isPlaying) return;
-
-      if (now - lastPaint < PLAYHEAD_THROTTLE_MS) return;
-      lastPaint = now;
-
-      ui.playheadReadout.innerText = `Playhead: ${Math.round(ms)} ms`;
-      redrawSelected(ms);
-    });
-
-    // ----------------------------
-    // Keyboard shortcuts
-    // ----------------------------
-    function handleKeyDown(e) {
-      if (isTextInputTarget(e.target)) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-
-      const key = e.key;
-
-      if (key === " " || key === "Spacebar") {
-        e.preventDefault();
-        if (isPlaying) doStop();
-        else doPlay().catch(() => {});
-        return;
-      }
-
-      if (key === "Enter") {
-        e.preventDefault();
-        doPlay().catch(() => {});
-        return;
-      }
-
-      if (key === "Escape") {
-        e.preventDefault();
-        doStop();
-        return;
-      }
-
-      if (key === "ArrowUp" || key === "ArrowLeft") {
-        e.preventDefault();
-        selectByIndex(getSelectedIndex() - 1).catch(() => {});
-        return;
-      }
-
-      if (key === "ArrowDown" || key === "ArrowRight") {
-        e.preventDefault();
-        selectByIndex(getSelectedIndex() + 1).catch(() => {});
-        return;
-      }
-
-      if (key === "Home") {
-        e.preventDefault();
-        selectByIndex(0).catch(() => {});
-        return;
-      }
-
-      if (key === "End") {
-        e.preventDefault();
-        selectByIndex(items.length - 1).catch(() => {});
-        return;
-      }
-
-      if (key.toLowerCase() === "l") {
-        e.preventDefault();
-        ui.loopToggle.checked = !ui.loopToggle.checked;
-        pLoop.value = ui.loopToggle.checked ? 1 : 0;
-        if (ui.loopToggle.checked) endedAndStopped = false;
-        return;
-      }
+      if (now - lastPaintAt >= UI_THROTTLE_MS) lastPaintAt = now;
+      requestAnimationFrame(tick);
     }
 
-    window.addEventListener("keydown", handleKeyDown, { passive: false });
-
-    // ----------------------------
-    // Initial render/load
-    // ----------------------------
+    // Init render
     renderList();
-    await loadSelectedIntoRNBO();
+    await setSelected(0);
+    requestAnimationFrame(tick);
   }
 
-  // Expose global initializer for app.js
   window.initPlaylistUI = initPlaylistUI;
-
 })();
