@@ -500,3 +500,276 @@ body {
   #playlist-ui .rnbo-top { padding: 36px; }
   #playlist-ui .rnbo-scroll { padding: 0 36px 36px 36px; }
 }
+
+/* ==========================================================
+   Penpot Component Integration
+   ========================================================== */
+
+/* Override Penpot body centering to allow full width */
+body {
+  align-items: stretch !important;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+#playlist-ui {
+  width: 100%;
+  max-width: 100%;
+  flex: 1;
+}
+
+/* Override Penpot fixed widths to be responsive */
+
+/* Header rows that should span full width */
+#playlist-ui .headerrow-5d594be7749d,
+#playlist-ui .headerrow-5d45f1f235c2,
+#playlist-ui .timerow-5d5b2679cb48,
+#playlist-ui .progresst-5d597bfabacb {
+  width: 100% !important;
+}
+
+/* Transport row - flex row, should span width but children keep natural size */
+#playlist-ui .headerrow-5d4f68010508 {
+  width: 100% !important;
+  flex-wrap: wrap;
+  padding: 10px 12px !important;
+  min-height: 60px;
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* Vol/Rate group - reasonable fixed width */
+#playlist-ui .volrategr-674724106f14 {
+  width: 160px !important;
+  flex-shrink: 0;
+}
+
+#playlist-ui .rategroup-5d578ccde31c,
+#playlist-ui .volumegro-6745cc1efa78 {
+  width: 100% !important;
+}
+
+/* Playlist item info - should expand */
+#playlist-ui .rnboitem-5d382f157a40 {
+  width: auto !important;
+  flex: 1 1 auto;
+}
+
+#playlist-ui .rnbowavef-60fd0a1350ed,
+#playlist-ui .waveformp-60fe06159afb {
+  width: 100% !important;
+}
+
+/* Left stack - fixed width for index/drag */
+#playlist-ui .rnboleft-610067288a8f {
+  width: 40px !important;
+  flex-shrink: 0;
+}
+
+/* Playlist items - ensure proper height */
+#playlist-ui .playlist-it-5d3648fdeb2a {
+  min-height: 80px;
+  padding: 12px !important;
+}
+
+/* Waveform canvas */
+#playlist-ui .waveform-canvas {
+  width: 100%;
+  height: 30px;
+  background: var(--ui-surface-2, #1c1c2a);
+  border: 1px solid var(--ui-border, rgba(255,255,255,0.08));
+  border-radius: 4px;
+  display: block;
+}
+
+/* Text content spans - simplified from Penpot's complex text structure */
+.text-content {
+  display: block;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Header fixed at top */
+#playlist-ui .header-tran-5d451590b627 {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Playlist scroll container */
+#playlist-ui .playlist-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Playlist items - clickable */
+#playlist-ui .playlist-it-5d3648fdeb2a {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+#playlist-ui .playlist-it-5d3648fdeb2a:hover {
+  background: var(--ui-surface-hover, #202036);
+}
+
+#playlist-ui .playlist-it-5d3648fdeb2a.is-active {
+  border-color: var(--ui-accent, #d8d0ee);
+  background: var(--ui-surface-active, #2a2a40);
+}
+
+/* Index badge layering fix */
+#playlist-ui .rnboindex-68bf9c1cef83 {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+
+#playlist-ui .rnboindex-68bf9c1cef83 .rectangle-5d370bd3a750 {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+#playlist-ui .rnboindex-68bf9c1cef83 .c-01-5d3745f8a4a4 {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Transport buttons - clickable and interactive */
+#playlist-ui .btnplay-5d54f720b486,
+#playlist-ui .btnstop-5d55fd4d7f07,
+#playlist-ui .btnloop-5d4fbcbdc95b {
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+  user-select: none;
+  width: 44px !important;
+  height: 44px !important;
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: visible !important;
+}
+
+/* Button icons - centered */
+#playlist-ui .btnplay-5d54f720b486 .shape.text,
+#playlist-ui .btnstop-5d55fd4d7f07 .shape.text,
+#playlist-ui .btnloop-5d4fbcbdc95b .shape.text {
+  width: auto !important;
+  height: auto !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#playlist-ui .btnplay-5d54f720b486 .text-content,
+#playlist-ui .btnstop-5d55fd4d7f07 .text-content,
+#playlist-ui .btnloop-5d4fbcbdc95b .text-content {
+  font-size: 20px;
+  line-height: 1;
+}
+
+#playlist-ui .btnplay-5d54f720b486:hover,
+#playlist-ui .btnstop-5d55fd4d7f07:hover,
+#playlist-ui .btnloop-5d4fbcbdc95b:hover {
+  background: var(--ui-surface-hover, #202036);
+}
+
+#playlist-ui .btnplay-5d54f720b486:active,
+#playlist-ui .btnstop-5d55fd4d7f07:active,
+#playlist-ui .btnloop-5d4fbcbdc95b:active {
+  transform: scale(0.95);
+}
+
+/* Loop button active state */
+#playlist-ui .btnloop-5d4fbcbdc95b.is-on {
+  border-color: var(--ui-accent, #d8d0ee);
+  box-shadow: 0 0 0 2px rgba(216, 208, 238, 0.25);
+}
+
+/* Sliders - replace Penpot placeholders */
+#playlist-ui .rateslide-5d58ab92a121,
+#playlist-ui .volslider-6745cc1efa79 {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: var(--ui-surface-active, #2a2a40);
+  border-radius: 999px;
+  cursor: pointer;
+  flex: 1;
+}
+
+#playlist-ui .rateslide-5d58ab92a121::-webkit-slider-thumb,
+#playlist-ui .volslider-6745cc1efa79::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--ui-text, #ffffff);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 1px solid rgba(0,0,0,0.2);
+}
+
+#playlist-ui .rateslide-5d58ab92a121::-moz-range-thumb,
+#playlist-ui .volslider-6745cc1efa79::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--ui-text, #ffffff);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 1px solid rgba(0,0,0,0.2);
+}
+
+/* Progress bar - dynamic width via JS */
+#playlist-ui .progressf-5d5a0fbfc2aa {
+  width: 0%;
+  transition: width 0.1s linear;
+}
+
+/* Progress track - clickable for seeking */
+#playlist-ui .progresst-5d597bfabacb {
+  cursor: pointer;
+  width: 100%;
+}
+
+/* Time display */
+#playlist-ui .timeelaps-5d5c7e2530fa,
+#playlist-ui .timeremai-5d5b574c9622 {
+  min-width: 40px;
+}
+
+/* Time row - space between elapsed and remaining */
+#playlist-ui .timerow-5d5b2679cb48 {
+  width: 100%;
+}
+
+#playlist-ui .timespace-5d5c1a16b26f {
+  flex: 1 1 auto;
+}
+
+/* Status badge text */
+#playlist-ui .statustex-5d4e6a28b511 .text-content {
+  color: var(--ui-text, #ffffff);
+  font-size: 11px;
+}
