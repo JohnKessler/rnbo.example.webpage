@@ -18,6 +18,8 @@
     let isLoop = false;
     let rate = 1;
     let animationFrameId = null;
+    let playheadMs = 0; // Received from RNBO outport
+    let isInitialized = false; // Prevents auto-play during load
 
     // ---------- DOM References ----------
     let ui = {};
@@ -117,14 +119,6 @@
 
         const it = items[currentIndex];
         const durationMs = it.durationMs;
-        let playheadMs = 0;
-
-        try {
-            playheadMs = param("playhead").value;
-        } catch (e) {
-            // Param not available yet
-        }
-
         const ratio = durationMs > 0 ? clamp(playheadMs / durationMs, 0, 1) : 0;
 
         // Get logical dimensions for high-DPI rendering
@@ -145,33 +139,41 @@
 
     // ---------- Playhead Polling ----------
     function startPlayheadPolling() {
-        if (animationFrameId) return;
+        // Cancel any existing polling first
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
+
+        console.log("[SpeakSpell] Starting playhead polling");
 
         function poll() {
             if (!isPlaying || currentIndex < 0) {
+                console.log("[SpeakSpell] Polling stopped - isPlaying:", isPlaying, "currentIndex:", currentIndex);
                 animationFrameId = null;
                 return;
             }
 
+            const durationMs = items[currentIndex]?.durationMs || 0;
+
+            // playheadMs is updated via RNBO outport subscription
+
+            // Update time displays
+            ui.elapsed.textContent = msToTime(playheadMs);
+            const remaining = Math.max(0, durationMs - playheadMs);
+            ui.remaining.textContent = "-" + msToTime(remaining);
+
+            // Update progress bar
+            if (durationMs > 0) {
+                const percent = clamp((playheadMs / durationMs) * 100, 0, 100);
+                ui.progressFill.style.width = percent + "%";
+            }
+
+            // Update main waveform with playhead
             try {
-                const playheadMs = param("playhead").value;
-                const durationMs = items[currentIndex]?.durationMs || 0;
-
-                // Update time displays
-                ui.elapsed.textContent = msToTime(playheadMs);
-                const remaining = Math.max(0, durationMs - playheadMs);
-                ui.remaining.textContent = "-" + msToTime(remaining);
-
-                // Update progress bar
-                if (durationMs > 0) {
-                    const percent = clamp((playheadMs / durationMs) * 100, 0, 100);
-                    ui.progressFill.style.width = percent + "%";
-                }
-
-                // Update main waveform with playhead
                 drawMainWaveformWithPlayhead();
             } catch (e) {
-                // Silently ignore
+                console.error("[SpeakSpell] Error drawing waveform:", e);
             }
 
             animationFrameId = requestAnimationFrame(poll);
@@ -273,9 +275,11 @@
 
         await loadIntoRNBO(it.audioBuffer);
 
-        // Reset playhead position (use larger margin for reverse to be safely inside buffer)
-        const jump = param("jumpto");
-        jump.value = rate < 0 ? Math.max(0, it.durationMs - 100) : 0;
+        // Only set jump position after initialization (prevents auto-play on load)
+        if (isInitialized) {
+            const jump = param("jumpto");
+            jump.value = rate < 0 ? Math.max(0, it.durationMs - 100) : 0;
+        }
 
         // Update time display
         ui.elapsed.textContent = "0:00";
@@ -301,7 +305,7 @@
     }
 
     function play() {
-        if (currentIndex < 0) return;
+        if (currentIndex < 0 || !isInitialized) return;
 
         const it = items[currentIndex];
         const jump = param("jumpto");
@@ -563,6 +567,13 @@
         device = rnboDevice;
         context = rnboContext;
 
+        // Subscribe to RNBO outport messages (playhead position)
+        device.messageEvent.subscribe((ev) => {
+            if (ev.tag === "playhead") {
+                playheadMs = ev.payload;
+            }
+        });
+
         // Cache DOM refs
         ui = {
             mainWaveformContainer: document.getElementById("main-waveform-container"),
@@ -580,7 +591,10 @@
             rateValue: document.getElementById("rate-value"),
             volumeSlider: document.getElementById("volume-slider"),
             volumeValue: document.getElementById("volume-value"),
-            playlistScroll: document.getElementById("playlist-scroll")
+            playlistScroll: document.getElementById("playlist-scroll"),
+            loadingOverlay: document.getElementById("loading-overlay"),
+            loadingBarFill: document.getElementById("loading-bar-fill"),
+            loadingStatus: document.getElementById("loading-status")
         };
 
         // Set canvas size based on container
@@ -635,22 +649,44 @@
         // Setup keyboard shortcuts
         setupKeyboardShortcuts();
 
-        // Load playlist
+        // Load playlist with progress indication
         const playlist = await fetchJSON(PLAYLIST_JSON);
+        const totalItems = playlist.items.length;
 
-        for (const filename of playlist.items) {
+        // Show initial loading status
+        ui.loadingStatus.textContent = `0 / ${totalItems}`;
+        ui.loadingBarFill.style.width = "0%";
+
+        for (let i = 0; i < totalItems; i++) {
+            const filename = playlist.items[i];
             const audioBuffer = await fetchAndDecode(MEDIA_BASE + filename);
             items.push({
                 filename,
                 audioBuffer,
                 durationMs: (audioBuffer.length / audioBuffer.sampleRate) * 1000
             });
+
+            // Update loading progress
+            const loaded = i + 1;
+            const percent = (loaded / totalItems) * 100;
+            ui.loadingStatus.textContent = `${loaded} / ${totalItems}`;
+            ui.loadingBarFill.style.width = `${percent}%`;
         }
+
+        // Hide loading overlay with fade
+        ui.loadingOverlay.classList.add("hidden");
 
         // Build playlist UI
         buildPlaylist();
 
-        // Auto-select first item
+        // Auto-select first item (just prepares display, doesn't play)
         await selectIndex(0);
+
+        // Explicitly reset triggers to prevent auto-play
+        param("playTrig").value = 0;
+        param("stopTrig").value = 0;
+
+        // Now ready for user interaction
+        isInitialized = true;
     };
 })();

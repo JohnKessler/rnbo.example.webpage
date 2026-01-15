@@ -161,20 +161,82 @@ html, body {
     width: 100%;
     height: 100%;
     display: block;
+    position: relative;
+    z-index: 1;
 }
 
 #playhead-line {
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 2px;
-    background: var(--ss-vfd-glow-bright);
+    width: 3px;
+    background: #FFFFFF;
     box-shadow:
-        0 0 6px var(--ss-vfd-glow),
-        0 0 12px var(--ss-vfd-glow);
+        0 0 8px var(--ss-vfd-glow),
+        0 0 16px var(--ss-vfd-glow),
+        0 0 24px var(--ss-vfd-glow-bright);
     left: 0;
     pointer-events: none;
-    transition: left 0.05s linear;
+    z-index: 10;
+}
+
+/* Loading Overlay */
+#loading-overlay {
+    position: absolute;
+    inset: 0;
+    background: var(--ss-vfd-bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    z-index: 20;
+    transition: opacity 0.4s ease-out;
+}
+
+#loading-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+#loading-overlay .loading-text {
+    font-size: 18px;
+    color: var(--ss-vfd-glow);
+    text-shadow:
+        0 0 8px var(--ss-vfd-glow),
+        0 0 16px var(--ss-vfd-glow);
+    letter-spacing: 0.3em;
+    animation: loadingPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes loadingPulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+}
+
+.loading-bar-track {
+    width: 70%;
+    max-width: 280px;
+    height: 8px;
+    background: var(--ss-vfd-off);
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid var(--ss-vfd-dim);
+}
+
+#loading-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--ss-vfd-dim), var(--ss-vfd-glow));
+    box-shadow: 0 0 10px var(--ss-vfd-glow);
+    border-radius: 4px;
+    transition: width 0.2s ease-out;
+}
+
+#loading-status {
+    font-size: 14px;
+    color: var(--ss-vfd-dim);
+    letter-spacing: 0.1em;
 }
 
 /* Progress Container */
