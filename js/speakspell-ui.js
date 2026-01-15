@@ -275,11 +275,9 @@
 
         await loadIntoRNBO(it.audioBuffer);
 
-        // Only set jump position after initialization (prevents auto-play on load)
-        if (isInitialized) {
-            const jump = param("jumpto");
-            jump.value = rate < 0 ? Math.max(0, it.durationMs - 100) : 0;
-        }
+        // Note: We do NOT set jumpto here - play() will handle it when needed.
+        // Setting jumpto can trigger RNBO to auto-play, which we want to avoid
+        // during track selection/loading.
 
         // Update time display
         ui.elapsed.textContent = "0:00";
@@ -682,9 +680,10 @@
         // Auto-select first item (just prepares display, doesn't play)
         await selectIndex(0);
 
-        // Explicitly reset triggers to prevent auto-play
+        // Explicitly ensure patch is stopped - pulse sends stop signal to RNBO
+        // This prevents auto-play when audio context is resumed on first user gesture
         param("playTrig").value = 0;
-        param("stopTrig").value = 0;
+        pulse(param("stopTrig"));
 
         // Now ready for user interaction
         isInitialized = true;
