@@ -21,6 +21,21 @@
     let playheadMs = 0; // Received from RNBO outport
     let isInitialized = false; // Prevents auto-play during load
 
+    // Spectrum analyzer state
+    let analyser = null;
+    let analyserData = null;
+    let spectrumAnimationId = null;
+
+    // Drag-and-drop state
+    let dragState = {
+        isDragging: false,
+        dragIndex: -1,
+        dragElement: null,
+        ghostElement: null,
+        startY: 0,
+        currentY: 0
+    };
+
     // ---------- DOM References ----------
     let ui = {};
 
@@ -189,6 +204,96 @@
         }
     }
 
+    // ---------- Spectrum Analyzer ----------
+    function setupAnalyser() {
+        if (!context) return;
+
+        analyser = context.createAnalyser();
+        analyser.fftSize = 64; // 32 frequency bins
+        analyser.smoothingTimeConstant = 0.8;
+        analyserData = new Uint8Array(analyser.frequencyBinCount);
+
+        // Connect to the output node for visualization
+        if (window.__rnboOutputNode) {
+            window.__rnboOutputNode.connect(analyser);
+        }
+    }
+
+    function drawSpectrum() {
+        if (!analyser || !ui.spectrumCanvas) return;
+
+        const canvas = ui.spectrumCanvas;
+        const ctx = canvas.getContext("2d");
+        const width = canvas.width;
+        const height = canvas.height;
+
+        // Clear with VFD background
+        ctx.fillStyle = "#0A1612";
+        ctx.fillRect(0, 0, width, height);
+
+        // Get frequency data
+        analyser.getByteFrequencyData(analyserData);
+
+        const barCount = analyserData.length;
+        const barWidth = width / barCount;
+        const gap = 1;
+
+        // Reset shadow for each frame
+        ctx.shadowBlur = 0;
+
+        for (let i = 0; i < barCount; i++) {
+            const value = analyserData[i];
+            const percent = value / 255;
+            const barHeight = percent * height;
+
+            // Color based on intensity - VFD style
+            if (percent > 0.7) {
+                ctx.fillStyle = "#00F5D4"; // Bright glow
+                ctx.shadowColor = "#00F5D4";
+                ctx.shadowBlur = 4;
+            } else if (percent > 0.3) {
+                ctx.fillStyle = "#1A5C52"; // Dim
+                ctx.shadowBlur = 0;
+            } else {
+                ctx.fillStyle = "#0D2E29"; // Very dim
+                ctx.shadowBlur = 0;
+            }
+
+            const x = i * barWidth + gap / 2;
+            const y = height - barHeight;
+            ctx.fillRect(x, y, barWidth - gap, barHeight);
+        }
+
+        ctx.shadowBlur = 0; // Reset shadow
+    }
+
+    function startSpectrumPolling() {
+        if (spectrumAnimationId) return;
+
+        function poll() {
+            drawSpectrum();
+            if (isPlaying) {
+                spectrumAnimationId = requestAnimationFrame(poll);
+            } else {
+                spectrumAnimationId = null;
+            }
+        }
+        spectrumAnimationId = requestAnimationFrame(poll);
+    }
+
+    function stopSpectrumPolling() {
+        if (spectrumAnimationId) {
+            cancelAnimationFrame(spectrumAnimationId);
+            spectrumAnimationId = null;
+        }
+        // Draw empty/dark spectrum
+        if (ui.spectrumCanvas) {
+            const ctx = ui.spectrumCanvas.getContext("2d");
+            ctx.fillStyle = "#0A1612";
+            ctx.fillRect(0, 0, ui.spectrumCanvas.width, ui.spectrumCanvas.height);
+        }
+    }
+
     // ---------- Seeking ----------
     function seekToPosition(clientX, element) {
         if (currentIndex < 0) return;
@@ -330,6 +435,7 @@
             pulse(param("playTrig"));
             isPlaying = true;
             startPlayheadPolling();
+            startSpectrumPolling();
 
             // If we temporarily enabled loop for reverse playback, disable it after playback starts
             if (needsTempLoop) {
@@ -344,6 +450,7 @@
         pulse(param("stopTrig"));
         isPlaying = false;
         stopPlayheadPolling();
+        stopSpectrumPolling();
 
         // Reset display
         ui.elapsed.textContent = "0:00";
@@ -529,6 +636,7 @@
                 return `
                     <div class="playlist-item" data-index="${i}">
                         <div class="item-header">
+                            <span class="drag-handle" aria-label="Drag to reorder">&#9776;</span>
                             <span class="item-index">${indexStr}</span>
                             <span class="item-name">${name}</span>
                             <span class="item-duration">${msToTime(it.durationMs)}</span>
@@ -549,15 +657,203 @@
             }
         });
 
-        // Click handlers
+        // Setup event handlers
+        setupPlaylistClickHandlers();
+        setupDragAndDrop();
+    }
+
+    function setupPlaylistClickHandlers() {
         document.querySelectorAll(".playlist-item").forEach((el) => {
-            el.addEventListener("click", async () => {
+            el.addEventListener("click", async (e) => {
+                // Ignore clicks on drag handle
+                if (e.target.classList.contains("drag-handle")) return;
+                // Ignore if dragging
+                if (dragState.isDragging) return;
+
                 window.dispatchEvent(new Event("rnbo:gesture"));
                 const idx = parseInt(el.dataset.index, 10);
                 await selectIndex(idx);
                 play();
             });
         });
+    }
+
+    // ---------- Drag and Drop ----------
+    function setupDragAndDrop() {
+        const playlistItems = ui.playlistScroll.querySelectorAll(".playlist-item");
+
+        playlistItems.forEach((item) => {
+            const handle = item.querySelector(".drag-handle");
+            if (!handle) return;
+
+            // Mouse events
+            handle.addEventListener("mousedown", (e) => startDrag(e, item));
+
+            // Touch events
+            handle.addEventListener("touchstart", (e) => startDrag(e, item), { passive: false });
+        });
+
+        // Document-level listeners for drag/end
+        document.addEventListener("mousemove", onDragMove);
+        document.addEventListener("mouseup", onDragEnd);
+        document.addEventListener("touchmove", onDragMove, { passive: false });
+        document.addEventListener("touchend", onDragEnd);
+    }
+
+    function startDrag(e, item) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        const index = parseInt(item.dataset.index, 10);
+
+        dragState = {
+            isDragging: true,
+            dragIndex: index,
+            dragElement: item,
+            ghostElement: null,
+            startY: clientY,
+            currentY: clientY
+        };
+
+        // Create ghost element
+        const ghost = item.cloneNode(true);
+        ghost.classList.add("drag-ghost");
+        ghost.style.width = item.offsetWidth + "px";
+        document.body.appendChild(ghost);
+        dragState.ghostElement = ghost;
+
+        // Position ghost at item's current position
+        const rect = item.getBoundingClientRect();
+        ghost.style.left = rect.left + "px";
+        ghost.style.top = rect.top + "px";
+
+        // Mark original as dragging
+        item.classList.add("is-dragging");
+    }
+
+    function onDragMove(e) {
+        if (!dragState.isDragging) return;
+
+        e.preventDefault();
+
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        dragState.currentY = clientY;
+
+        // Move ghost
+        if (dragState.ghostElement) {
+            const deltaY = clientY - dragState.startY;
+            const rect = dragState.dragElement.getBoundingClientRect();
+            dragState.ghostElement.style.top = (rect.top + deltaY) + "px";
+        }
+
+        // Find drop target and show indicators
+        const playlistItems = document.querySelectorAll(".playlist-item:not(.is-dragging)");
+        playlistItems.forEach((item) => {
+            item.classList.remove("drop-above", "drop-below");
+
+            const rect = item.getBoundingClientRect();
+            const midY = rect.top + rect.height / 2;
+
+            if (clientY >= rect.top && clientY <= rect.bottom) {
+                if (clientY < midY) {
+                    item.classList.add("drop-above");
+                } else {
+                    item.classList.add("drop-below");
+                }
+            }
+        });
+    }
+
+    function onDragEnd() {
+        if (!dragState.isDragging) return;
+
+        // Find target position
+        const playlistItems = document.querySelectorAll(".playlist-item");
+        let targetIndex = dragState.dragIndex;
+
+        playlistItems.forEach((item) => {
+            if (item.classList.contains("drop-above")) {
+                targetIndex = parseInt(item.dataset.index, 10);
+            } else if (item.classList.contains("drop-below")) {
+                targetIndex = parseInt(item.dataset.index, 10) + 1;
+            }
+            item.classList.remove("drop-above", "drop-below");
+        });
+
+        // Clean up
+        if (dragState.ghostElement) {
+            dragState.ghostElement.remove();
+        }
+        if (dragState.dragElement) {
+            dragState.dragElement.classList.remove("is-dragging");
+        }
+
+        // Reorder if position changed
+        const fromIndex = dragState.dragIndex;
+        if (targetIndex !== fromIndex && targetIndex !== fromIndex + 1) {
+            reorderPlaylist(fromIndex, targetIndex);
+        }
+
+        // Reset state
+        dragState = {
+            isDragging: false,
+            dragIndex: -1,
+            dragElement: null,
+            ghostElement: null,
+            startY: 0,
+            currentY: 0
+        };
+    }
+
+    function reorderPlaylist(fromIndex, toIndex) {
+        // Adjust toIndex if moving down (account for removal)
+        if (toIndex > fromIndex) {
+            toIndex--;
+        }
+
+        // Reorder the items array
+        const [movedItem] = items.splice(fromIndex, 1);
+        items.splice(toIndex, 0, movedItem);
+
+        // Update currentIndex if needed
+        if (currentIndex === fromIndex) {
+            // The playing item was moved
+            currentIndex = toIndex;
+        } else if (fromIndex < currentIndex && toIndex >= currentIndex) {
+            // Item moved from before current to after - current shifts down
+            currentIndex--;
+        } else if (fromIndex > currentIndex && toIndex <= currentIndex) {
+            // Item moved from after current to before - current shifts up
+            currentIndex++;
+        }
+
+        // Rebuild the playlist UI
+        rebuildPlaylistUI();
+    }
+
+    function rebuildPlaylistUI() {
+        const playlistItems = document.querySelectorAll(".playlist-item");
+
+        playlistItems.forEach((el, i) => {
+            el.dataset.index = i;
+
+            const indexEl = el.querySelector(".item-index");
+            const nameEl = el.querySelector(".item-name");
+            const durationEl = el.querySelector(".item-duration");
+            const canvas = el.querySelector("canvas");
+
+            if (indexEl) indexEl.textContent = String(i + 1).padStart(2, "0");
+            if (nameEl) nameEl.textContent = items[i].filename.replace(/\.[^/.]+$/, "");
+            if (durationEl) durationEl.textContent = msToTime(items[i].durationMs);
+            if (canvas) {
+                canvas.dataset.waveform = i;
+                drawWaveform(canvas, items[i].audioBuffer);
+            }
+        });
+
+        // Update active highlighting
+        updateActiveItem(currentIndex);
     }
 
     // ---------- Initialize ----------
@@ -592,7 +888,8 @@
             playlistScroll: document.getElementById("playlist-scroll"),
             loadingOverlay: document.getElementById("loading-overlay"),
             loadingBarFill: document.getElementById("loading-bar-fill"),
-            loadingStatus: document.getElementById("loading-status")
+            loadingStatus: document.getElementById("loading-status"),
+            spectrumCanvas: document.getElementById("spectrum-canvas")
         };
 
         // Set canvas size based on container
@@ -615,6 +912,30 @@
         // Initial resize
         setTimeout(resizeMainWaveform, 100);
         window.addEventListener("resize", resizeMainWaveform);
+
+        // Setup spectrum canvas sizing
+        const resizeSpectrumCanvas = () => {
+            if (!ui.spectrumCanvas) return;
+            const container = ui.spectrumCanvas.parentElement;
+            if (!container) return;
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            ui.spectrumCanvas.width = width * window.devicePixelRatio;
+            ui.spectrumCanvas.height = height * window.devicePixelRatio;
+            ui.spectrumCanvas.style.width = width + "px";
+            ui.spectrumCanvas.style.height = height + "px";
+            const ctx = ui.spectrumCanvas.getContext("2d");
+            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            // Draw empty spectrum initially
+            ctx.fillStyle = "#0A1612";
+            ctx.fillRect(0, 0, width, height);
+        };
+
+        setTimeout(resizeSpectrumCanvas, 100);
+        window.addEventListener("resize", resizeSpectrumCanvas);
+
+        // Setup spectrum analyzer
+        setupAnalyser();
 
         // Bind transport buttons
         ui.btnPlay.addEventListener("click", () => {

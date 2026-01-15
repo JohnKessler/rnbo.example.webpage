@@ -302,6 +302,33 @@ html, body {
     text-transform: uppercase;
 }
 
+/* Now Playing Section with Spectrum Analyzer */
+#now-playing-section {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+#now-playing-section #now-playing {
+    margin-top: 0;
+}
+
+#spectrum-container {
+    width: 100%;
+    height: 32px;
+    background: var(--ss-vfd-bg);
+    border: 1px solid var(--ss-vfd-dim);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+#spectrum-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
 /* ---------- Control Panel ---------- */
 .control-panel {
     padding: 16px;
@@ -614,6 +641,55 @@ html, body {
     color: var(--ss-vfd-glow);
 }
 
+/* Drag handle */
+.drag-handle {
+    font-size: 14px;
+    color: var(--ss-vfd-dim);
+    cursor: grab;
+    padding: 0 6px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    transition: color 0.15s;
+}
+
+.drag-handle:hover {
+    color: var(--ss-vfd-glow);
+}
+
+.drag-handle:active {
+    cursor: grabbing;
+}
+
+/* Dragging states */
+.playlist-item.is-dragging {
+    opacity: 0.4;
+    border-style: dashed;
+}
+
+.playlist-item.drop-above {
+    border-top: 2px solid var(--ss-vfd-glow);
+    box-shadow: 0 -4px 8px rgba(0, 245, 212, 0.3);
+}
+
+.playlist-item.drop-below {
+    border-bottom: 2px solid var(--ss-vfd-glow);
+    box-shadow: 0 4px 8px rgba(0, 245, 212, 0.3);
+}
+
+/* Drag ghost */
+.drag-ghost {
+    position: fixed;
+    z-index: 1000;
+    pointer-events: none;
+    opacity: 0.9;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    transform: scale(1.02);
+    background: var(--ss-vfd-bg);
+    border: 2px solid var(--ss-vfd-glow);
+    border-radius: 4px;
+}
+
 /* Per-track waveform */
 .playlist-item .item-waveform {
     width: 100%;
@@ -746,6 +822,19 @@ html, body {
 
     #track-name {
         font-size: 26px;
+    }
+
+    /* Spectrum analyzer side-by-side with Now Playing on desktop */
+    #now-playing-section {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    #spectrum-container {
+        width: 150px;
+        height: 40px;
+        flex-shrink: 0;
     }
 
     .control-panel {

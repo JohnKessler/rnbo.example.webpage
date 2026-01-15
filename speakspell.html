@@ -45,10 +45,15 @@
                     <span id="remaining" class="vfd-text time">-0:00</span>
                 </div>
 
-                <!-- Now playing -->
-                <div id="now-playing">
-                    <span class="label">NOW PLAYING:</span>
-                    <span id="track-name" class="vfd-text">---</span>
+                <!-- Now playing with spectrum analyzer -->
+                <div id="now-playing-section">
+                    <div id="now-playing">
+                        <span class="label">NOW PLAYING:</span>
+                        <span id="track-name" class="vfd-text">---</span>
+                    </div>
+                    <div id="spectrum-container">
+                        <canvas id="spectrum-canvas"></canvas>
+                    </div>
                 </div>
             </section>
 
