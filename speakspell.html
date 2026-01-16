@@ -20,7 +20,7 @@
 
             <!-- VFD Display Section -->
             <section id="display" class="vfd-panel">
-                <h1 id="title" class="vfd-text">SPEAK & SPELL SAMPLER</h1>
+                <h1 id="title" class="vfd-text vfd-ghost" data-text="SPEAK & SPELL SAMPLER">SPEAK & SPELL SAMPLER</h1>
 
                 <!-- Main waveform display -->
                 <div id="main-waveform-container" class="waveform-display">
@@ -28,11 +28,13 @@
                     <div id="playhead-line"></div>
                     <!-- Loading overlay -->
                     <div id="loading-overlay">
+                        <div id="error-face" class="error-face" style="display: none;">:(</div>
                         <div class="loading-text vfd-text">LOADING</div>
                         <div class="loading-bar-track">
                             <div id="loading-bar-fill"></div>
                         </div>
                         <div id="loading-status" class="vfd-text">0 / 0</div>
+                        <div id="error-message" class="error-message vfd-text" style="display: none;"></div>
                     </div>
                 </div>
 
@@ -49,7 +51,7 @@
                 <div id="now-playing-section">
                     <div id="now-playing">
                         <span class="label">NOW PLAYING:</span>
-                        <span id="track-name" class="vfd-text">---</span>
+                        <span id="track-name" class="vfd-text vfd-ghost" data-text="---">---</span>
                     </div>
                     <div id="spectrum-container">
                         <canvas id="spectrum-canvas"></canvas>

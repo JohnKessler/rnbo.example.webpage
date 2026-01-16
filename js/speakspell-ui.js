@@ -26,6 +26,25 @@
     let analyserData = null;
     let spectrumAnimationId = null;
 
+    // LED ladder spectrum configuration
+    const SPECTRUM_CONFIG = {
+        bandCount: 24,           // Number of frequency bands
+        squaresPerBand: 12,      // Vertical squares per band
+        peakDecayRate: 0.15,     // How fast peaks fall (squares per frame)
+        peakHoldTime: 15,        // Frames to hold peak before decay
+        gap: 1,                  // Gap between squares
+        // Frequency bands for proper 20Hz-20kHz coverage (logarithmic)
+        freqBands: [
+            20, 25, 31, 40, 50, 63, 80, 100, 125, 160, 200, 250,
+            315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500,
+            3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000
+        ]
+    };
+
+    // Peak hold state for ghost effect
+    let peakLevels = [];      // Current peak level per band (0-1)
+    let peakHoldCounters = []; // Frames remaining in hold state
+
     // Drag-and-drop state
     let dragState = {
         isDragging: false,
@@ -209,9 +228,13 @@
         if (!context) return;
 
         analyser = context.createAnalyser();
-        analyser.fftSize = 64; // 32 frequency bins
-        analyser.smoothingTimeConstant = 0.8;
+        analyser.fftSize = 2048; // Higher resolution for accurate frequency mapping
+        analyser.smoothingTimeConstant = 0.7;
         analyserData = new Uint8Array(analyser.frequencyBinCount);
+
+        // Initialize peak hold arrays
+        peakLevels = new Array(SPECTRUM_CONFIG.bandCount).fill(0);
+        peakHoldCounters = new Array(SPECTRUM_CONFIG.bandCount).fill(0);
 
         // Connect to the output node for visualization
         if (window.__rnboOutputNode) {
@@ -219,13 +242,39 @@
         }
     }
 
+    // Get the average amplitude for a frequency range
+    function getFrequencyRangeValue(startFreq, endFreq) {
+        if (!analyser || !analyserData) return 0;
+
+        const nyquist = context.sampleRate / 2;
+        const binCount = analyser.frequencyBinCount;
+        const binWidth = nyquist / binCount;
+
+        const startBin = Math.floor(startFreq / binWidth);
+        const endBin = Math.min(Math.floor(endFreq / binWidth), binCount - 1);
+
+        if (startBin >= binCount || endBin < 0) return 0;
+
+        let sum = 0;
+        let count = 0;
+        for (let i = Math.max(0, startBin); i <= endBin; i++) {
+            sum += analyserData[i];
+            count++;
+        }
+
+        return count > 0 ? sum / count / 255 : 0;
+    }
+
     function drawSpectrum() {
         if (!analyser || !ui.spectrumCanvas) return;
 
         const canvas = ui.spectrumCanvas;
         const ctx = canvas.getContext("2d");
-        const width = canvas.width;
-        const height = canvas.height;
+
+        // Get logical dimensions (accounting for devicePixelRatio scaling)
+        const container = canvas.parentElement;
+        const width = container ? container.clientWidth : canvas.width;
+        const height = container ? container.clientHeight : canvas.height;
 
         // Clear with VFD background
         ctx.fillStyle = "#0A1612";
@@ -234,34 +283,90 @@
         // Get frequency data
         analyser.getByteFrequencyData(analyserData);
 
-        const barCount = analyserData.length;
-        const barWidth = width / barCount;
-        const gap = 1;
+        const { bandCount, squaresPerBand, peakDecayRate, peakHoldTime, gap, freqBands } = SPECTRUM_CONFIG;
 
-        // Reset shadow for each frame
+        // Calculate dimensions
+        const bandWidth = width / bandCount;
+        const squareWidth = bandWidth - gap * 2;
+        const squareHeight = (height - gap * (squaresPerBand + 1)) / squaresPerBand;
+
+        // Reset shadow
         ctx.shadowBlur = 0;
 
-        for (let i = 0; i < barCount; i++) {
-            const value = analyserData[i];
-            const percent = value / 255;
-            const barHeight = percent * height;
+        for (let band = 0; band < bandCount; band++) {
+            // Get frequency range for this band
+            const startFreq = freqBands[band] || 20;
+            const endFreq = freqBands[band + 1] || 20000;
 
-            // Color based on intensity - VFD style
-            if (percent > 0.7) {
-                ctx.fillStyle = "#00F5D4"; // Bright glow
-                ctx.shadowColor = "#00F5D4";
-                ctx.shadowBlur = 4;
-            } else if (percent > 0.3) {
-                ctx.fillStyle = "#1A5C52"; // Dim
-                ctx.shadowBlur = 0;
+            // Get amplitude for this frequency range (0-1)
+            const amplitude = getFrequencyRangeValue(startFreq, endFreq);
+
+            // Calculate how many squares should be lit (0 to squaresPerBand)
+            const litSquares = Math.floor(amplitude * squaresPerBand);
+
+            // Update peak hold (ghost effect)
+            if (amplitude >= peakLevels[band]) {
+                // New peak - reset hold counter
+                peakLevels[band] = amplitude;
+                peakHoldCounters[band] = peakHoldTime;
+            } else if (peakHoldCounters[band] > 0) {
+                // In hold period - don't decay yet
+                peakHoldCounters[band]--;
             } else {
-                ctx.fillStyle = "#0D2E29"; // Very dim
-                ctx.shadowBlur = 0;
+                // Decay the peak
+                peakLevels[band] = Math.max(0, peakLevels[band] - peakDecayRate / squaresPerBand);
             }
 
-            const x = i * barWidth + gap / 2;
-            const y = height - barHeight;
-            ctx.fillRect(x, y, barWidth - gap, barHeight);
+            const peakSquare = Math.floor(peakLevels[band] * squaresPerBand);
+
+            // Draw squares for this band (bottom to top)
+            for (let sq = 0; sq < squaresPerBand; sq++) {
+                const x = band * bandWidth + gap;
+                const y = height - (sq + 1) * (squareHeight + gap);
+
+                // Determine square state and color
+                const isLit = sq < litSquares;
+                const isPeak = sq === peakSquare && peakSquare > litSquares;
+                const isGhost = sq < peakSquare && sq >= litSquares;
+
+                if (isLit) {
+                    // Active/lit squares - intensity based on position
+                    const intensity = sq / squaresPerBand;
+                    if (intensity > 0.75) {
+                        // Top tier - brightest with glow
+                        ctx.fillStyle = "#00F5D4";
+                        ctx.shadowColor = "#00F5D4";
+                        ctx.shadowBlur = 3;
+                    } else if (intensity > 0.5) {
+                        // Upper-mid tier - bright
+                        ctx.fillStyle = "#00D4B8";
+                        ctx.shadowBlur = 0;
+                    } else if (intensity > 0.25) {
+                        // Lower-mid tier - medium
+                        ctx.fillStyle = "#1A8C7A";
+                        ctx.shadowBlur = 0;
+                    } else {
+                        // Bottom tier - dim but lit
+                        ctx.fillStyle = "#1A5C52";
+                        ctx.shadowBlur = 0;
+                    }
+                } else if (isPeak || isGhost) {
+                    // Ghost/peak hold squares - dimmer, with slight blur effect
+                    ctx.fillStyle = isPeak ? "#1A5C52" : "#0F3D35";
+                    ctx.shadowColor = "#00F5D4";
+                    ctx.shadowBlur = isPeak ? 2 : 0;
+                } else {
+                    // Unlit squares - very dim background
+                    ctx.fillStyle = "#0D2E29";
+                    ctx.shadowBlur = 0;
+                }
+
+                // Draw rounded rectangle for each square
+                const radius = 1;
+                ctx.beginPath();
+                ctx.roundRect(x, y, squareWidth, squareHeight, radius);
+                ctx.fill();
+            }
         }
 
         ctx.shadowBlur = 0; // Reset shadow
@@ -286,11 +391,39 @@
             cancelAnimationFrame(spectrumAnimationId);
             spectrumAnimationId = null;
         }
-        // Draw empty/dark spectrum
+
+        // Reset peak levels
+        peakLevels = new Array(SPECTRUM_CONFIG.bandCount).fill(0);
+        peakHoldCounters = new Array(SPECTRUM_CONFIG.bandCount).fill(0);
+
+        // Draw empty LED ladder spectrum
         if (ui.spectrumCanvas) {
-            const ctx = ui.spectrumCanvas.getContext("2d");
+            const canvas = ui.spectrumCanvas;
+            const ctx = canvas.getContext("2d");
+            const container = canvas.parentElement;
+            const width = container ? container.clientWidth : canvas.width;
+            const height = container ? container.clientHeight : canvas.height;
+
+            const { bandCount, squaresPerBand, gap } = SPECTRUM_CONFIG;
+            const bandWidth = width / bandCount;
+            const squareWidth = bandWidth - gap * 2;
+            const squareHeight = (height - gap * (squaresPerBand + 1)) / squaresPerBand;
+
+            // Clear background
             ctx.fillStyle = "#0A1612";
-            ctx.fillRect(0, 0, ui.spectrumCanvas.width, ui.spectrumCanvas.height);
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw unlit squares
+            ctx.fillStyle = "#0D2E29";
+            for (let band = 0; band < bandCount; band++) {
+                for (let sq = 0; sq < squaresPerBand; sq++) {
+                    const x = band * bandWidth + gap;
+                    const y = height - (sq + 1) * (squareHeight + gap);
+                    ctx.beginPath();
+                    ctx.roundRect(x, y, squareWidth, squareHeight, 1);
+                    ctx.fill();
+                }
+            }
         }
     }
 
@@ -389,8 +522,10 @@
         ui.remaining.textContent = "-" + msToTime(it.durationMs);
         ui.progressFill.style.width = "0%";
 
-        // Update track name
-        ui.trackName.textContent = it.filename.replace(/\.[^/.]+$/, "");
+        // Update track name and ghost effect data attribute
+        const trackDisplayName = it.filename.replace(/\.[^/.]+$/, "");
+        ui.trackName.textContent = trackDisplayName;
+        ui.trackName.setAttribute("data-text", trackDisplayName);
 
         // Draw main waveform with logical dimensions
         const logicalWidth = ui.mainWaveformContainer.clientWidth;
@@ -889,8 +1024,21 @@
             loadingOverlay: document.getElementById("loading-overlay"),
             loadingBarFill: document.getElementById("loading-bar-fill"),
             loadingStatus: document.getElementById("loading-status"),
+            loadingText: document.querySelector("#loading-overlay .loading-text"),
+            errorFace: document.getElementById("error-face"),
+            errorMessage: document.getElementById("error-message"),
             spectrumCanvas: document.getElementById("spectrum-canvas")
         };
+
+        // Helper function to show loading error
+        function showLoadingError(message) {
+            ui.loadingOverlay.classList.add("has-error");
+            ui.errorFace.style.display = "block";
+            ui.loadingText.textContent = "ERROR";
+            ui.errorMessage.textContent = message;
+            ui.errorMessage.style.display = "block";
+            ui.loadingStatus.style.display = "none";
+        }
 
         // Set canvas size based on container
         const resizeMainWaveform = () => {
@@ -968,28 +1116,62 @@
         // Setup keyboard shortcuts
         setupKeyboardShortcuts();
 
-        // Load playlist with progress indication
-        const playlist = await fetchJSON(PLAYLIST_JSON);
+        // Load playlist with progress indication and error handling
+        let playlist;
+        try {
+            playlist = await fetchJSON(PLAYLIST_JSON);
+        } catch (err) {
+            console.error("[SpeakSpell] Failed to load playlist:", err);
+            showLoadingError("Failed to load playlist. Check your connection and refresh.");
+            return;
+        }
+
         const totalItems = playlist.items.length;
+        if (totalItems === 0) {
+            showLoadingError("Playlist is empty. No audio files found.");
+            return;
+        }
 
         // Show initial loading status
         ui.loadingStatus.textContent = `0 / ${totalItems}`;
         ui.loadingBarFill.style.width = "0%";
 
+        let loadErrors = 0;
+        const maxErrors = 3; // Allow a few failures before giving up
+
         for (let i = 0; i < totalItems; i++) {
             const filename = playlist.items[i];
-            const audioBuffer = await fetchAndDecode(MEDIA_BASE + filename);
-            items.push({
-                filename,
-                audioBuffer,
-                durationMs: (audioBuffer.length / audioBuffer.sampleRate) * 1000
-            });
+
+            try {
+                const audioBuffer = await fetchAndDecode(MEDIA_BASE + filename);
+                items.push({
+                    filename,
+                    audioBuffer,
+                    durationMs: (audioBuffer.length / audioBuffer.sampleRate) * 1000
+                });
+            } catch (err) {
+                console.error(`[SpeakSpell] Failed to load "${filename}":`, err);
+                loadErrors++;
+
+                if (loadErrors >= maxErrors) {
+                    showLoadingError(`Failed to load audio files. Check your connection and refresh.`);
+                    return;
+                }
+                // Skip this file and continue with others
+                continue;
+            }
 
             // Update loading progress
-            const loaded = i + 1;
-            const percent = (loaded / totalItems) * 100;
+            const loaded = items.length;
+            const percent = ((i + 1) / totalItems) * 100;
             ui.loadingStatus.textContent = `${loaded} / ${totalItems}`;
             ui.loadingBarFill.style.width = `${percent}%`;
+        }
+
+        // Check if we loaded any items
+        if (items.length === 0) {
+            showLoadingError("No audio files could be loaded. Please refresh and try again.");
+            return;
         }
 
         // Hide loading overlay with fade
